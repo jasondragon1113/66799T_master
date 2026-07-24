@@ -95,6 +95,13 @@ class Drive{
 
         float drive_error = 0;
 
+        // --- vexdash live PID telemetry (auto-streamed to the web dashboard) ---
+        float tele_drive_target = 0;   // drive_distance target (in)
+        float tele_drive_output = 0;   // drive PID output (volts)
+        float tele_turn_target  = 0;   // turn target heading (deg)
+        float tele_turn_error   = 0;   // live turn error (deg)
+        float tele_turn_output  = 0;   // turn PID output (volts)
+
         Drive(DriveStyle drive_style, MotorGroup& left_motors, MotorGroup& right_motors, IMU& inertial, 
               float wheel_diameter, float motor_gear_ratio, float gyro_scale, 
               Rotation& fwd_tracker, float fwd_tracker_diameter, float fwd_tracker_dist, 

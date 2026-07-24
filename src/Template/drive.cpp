@@ -256,15 +256,18 @@ void Drive::turn_to_angle(float angle, float extra_angle_deg, bool motion_chaini
 
 void Drive::turn_to_angle(float angle, float extra_angle_deg, float extra_drive_voltage, bool motion_chaining){
   angle += extra_angle_deg;
+  tele_turn_target = angle; // vexdash telemetry
   PID turnPID(reduce_negative_180_to_180(angle - get_absolute_heading()), turn_kp, turn_ki, turn_kd, turn_starti, turn_settle_error, turn_settle_time, turn_timeout);
   while( !turnPID.is_settled() ){
     float error = reduce_negative_180_to_180(angle - get_absolute_heading());
+    tele_turn_error = error; // vexdash telemetry
 
     if(motion_chaining && fabs(error) < motion_chain_turn_early_exit_range){
       break;
     }
 
     float output = turnPID.compute(error);
+    tele_turn_output = output; // vexdash telemetry
     output = clamp(output, -turn_max_voltage, turn_max_voltage);
 
     if(motion_chaining){
@@ -297,6 +300,7 @@ void Drive::drive_distance(float distance, float extra_drive_voltage, bool motio
 }
 
 void Drive::drive_distance(float distance, float extra_drive_voltage, bool motion_chaining, float heading){
+  tele_drive_target = distance; // vexdash telemetry
   PID drivePID(distance, drive_kp, drive_ki, drive_kd, drive_starti, drive_settle_error, drive_settle_time, drive_timeout);
   PID headingPID(reduce_negative_180_to_180(heading - get_absolute_heading()), heading_kp, heading_ki, heading_kd, heading_starti);
   float start_average_position = (get_left_position_in()+get_right_position_in())/2.0;
@@ -310,6 +314,7 @@ void Drive::drive_distance(float distance, float extra_drive_voltage, bool motio
 
     float heading_error = reduce_negative_180_to_180(heading - get_absolute_heading());
     float drive_output = drivePID.compute(drive_error);
+    tele_drive_output = drive_output; // vexdash telemetry
     float heading_output = headingPID.compute(heading_error);
 
     drive_output = clamp(drive_output, -drive_max_voltage, drive_max_voltage);
