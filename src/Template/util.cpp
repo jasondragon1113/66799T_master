@@ -30,11 +30,15 @@ void brake_with_mode_group(MotorGroup& motor_group, MotorBrake new_mode) {
  */
 
 float reduce_0_to_360(float angle) {
-  while(!(angle >= 0 && angle < 360)) {
-    if( angle < 0 ) { angle += 360; }
-    if(angle >= 360) { angle -= 360; }
-  }
-  return(angle);
+  // A NaN/inf angle (e.g. from a disconnected/uncalibrated IMU returning
+  // PROS_ERR_F) never satisfies the range check below, so a while-loop
+  // version of this spins forever -- that's what was hanging the dashboard
+  // task solid whenever the Position tab read the heading. fmodf is O(1)
+  // and can't loop at all.
+  if(!std::isfinite(angle)) return 0;
+  angle = fmodf(angle, 360.0f);
+  if(angle < 0) angle += 360.0f;
+  return angle;
 }
 
 /**
@@ -45,11 +49,10 @@ float reduce_0_to_360(float angle) {
  */
 
 float reduce_negative_180_to_180(float angle) {
-  while(!(angle >= -180 && angle < 180)) {
-    if( angle < -180 ) { angle += 360; }
-    if(angle >= 180) { angle -= 360; }
-  }
-  return(angle);
+  if(!std::isfinite(angle)) return 0;
+  angle = fmodf(angle + 180.0f, 360.0f);
+  if(angle < 0) angle += 360.0f;
+  return angle - 180.0f;
 }
 
 /**
@@ -62,11 +65,10 @@ float reduce_negative_180_to_180(float angle) {
  */
 
 float reduce_negative_90_to_90(float angle) {
-  while(!(angle >= -90 && angle < 90)) {
-    if( angle < -90 ) { angle += 180; }
-    if(angle >= 90) { angle -= 180; }
-  }
-  return(angle);
+  if(!std::isfinite(angle)) return 0;
+  angle = fmodf(angle + 90.0f, 180.0f);
+  if(angle < 0) angle += 180.0f;
+  return angle - 90.0f;
 }
 
 /**

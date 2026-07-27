@@ -185,8 +185,4 @@ class Drive{
         int last_found_index;
         CurvePoint get_follow_point(std::vector<CurvePoint> path_points, Point robot_pos, float follow_radius);
         void follow_path(std::vector<CurvePoint> path_points);
-
-        void upper_intake();
-        int outtakelift_count;
-        int outtakelift_count1;
 };

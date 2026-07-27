@@ -168,7 +168,8 @@ void map_task(){
 
 // ============================================================================
 // Dashboard: 3-tab touchscreen UI (Motors / Position / Auton Select)
-// Screen is 480x240. Tab bar occupies y 0-20, content area is y 20-240.
+// SAO tab disabled, see sao_gallery.cpp
+// Screen is 480x240. Tab bar occupies y 0-26, content area is y 26-240.
 // ============================================================================
 
 AutonRoutine selected_auton = AutonRoutine::left;
@@ -176,7 +177,7 @@ AutonRoutine selected_auton = AutonRoutine::left;
 DisplayTab current_tab = DisplayTab::MOTORS;
 
 const int TAB_BAR_HEIGHT = 26;
-const int TAB_WIDTH = 160;
+const int TAB_WIDTH = 120;
 const int OVERHEAT_THRESHOLD = 45;
 
 // Color palette (kept in one place so the whole UI stays visually consistent)
@@ -225,8 +226,8 @@ struct MotorInfo {
   Motor* motor;
 };
 
-// leftFront/leftMiddle/.../cascade2 are declared in robot-config.h
-MotorInfo dashboard_motors[9] = {
+// leftFront/leftMiddle/.../cascade2/arm are declared in robot-config.h
+MotorInfo dashboard_motors[10] = {
   {"leftFront",   &leftFront},
   {"leftMiddle",  &leftMiddle},
   {"leftBack",    &leftBack},
@@ -236,6 +237,7 @@ MotorInfo dashboard_motors[9] = {
   {"intake",      &intake},
   {"cascade1",    &cascade1},
   {"cascade2",    &cascade2},
+  {"arm",         &arm},
 };
 
 // Auton Select box geometry, shared between drawing and touch hit-testing.
@@ -262,7 +264,7 @@ int dashboard_center_x(pros::text_format_e_t fmt, int x0, int x1, const char* te
 }
 
 void dashboard_draw_tab_bar(){
-  const char* labels[3] = {"MOTORS", "POSITION", "AUTON"};
+  const char* labels[3] = {"MOTORS", "POSITION", "AUTON"}; // SAO tab disabled, see sao_gallery.cpp
   const int margin = 4;
   const int radius = 8;
 
@@ -308,7 +310,7 @@ const int IMU_BTN_Y1 = IMU_BTN_Y0 + 26;
 
 void dashboard_draw_motors_tab(){
   int col_x[2] = {10, 250};
-  int col_counts[2] = {5, 4};
+  int col_counts[2] = {5, 5};
   int row_h = MOTOR_ROW_H;
   int start_y = MOTOR_START_Y;
   int idx = 0;
@@ -336,6 +338,13 @@ void dashboard_draw_motors_tab(){
       screen::set_pen(status_color);
       screen::fill_circle(x + 5, y + 8, 5);
 
+      // Clear just this row's text field so stale characters from a
+      // previous (longer) value can't linger -- cheaper and less flashy
+      // than blanking the whole tab every cycle.
+      screen::set_pen(COLOR_BG);
+      screen::set_eraser(COLOR_BG);
+      screen::fill_rect(x + 20, y, x + 230, y + row_h - 2);
+
       screen::set_pen(COLOR_TEXT);
       if(disconnected){
         screen::print(TEXT_MEDIUM, x + 20, y, "%-12s NA", info.name);
@@ -359,38 +368,93 @@ void dashboard_draw_motors_tab(){
   const char* imu_text;
   if(!imu_installed || imu_status == pros::ImuStatus::error){
     imu_color = pros::c::COLOR_RED;
-    imu_text = "IMU NA";
   } else if(imu_calibrating){
     imu_color = pros::c::COLOR_YELLOW;
-    imu_text = "IMU CALIBRATING";
   } else {
     imu_color = pros::c::COLOR_GREEN;
-    imu_text = "IMU CONNECTED";
   }
+  imu_text = "IMU"; // status conveyed by the dot color, same as the L/R distance labels below
 
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(30, IMU_ROW_Y, 185, IMU_ROW_Y + row_h - 2);
   screen::set_pen(imu_color);
   screen::fill_circle(15, IMU_ROW_Y + 8, 5);
   screen::set_pen(COLOR_TEXT);
   screen::print(TEXT_MEDIUM, 30, IMU_ROW_Y, imu_text);
 
-  // Button to (re)initialize/calibrate the IMU
-  if(imu_calibrating){
-    screen::set_pen(COLOR_ACCENT);
-    screen::set_eraser(COLOR_ACCENT);
+  // Distance sensors L/R, same row as IMU status.
+  char dist_buf[16];
+
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(200, IMU_ROW_Y, 260, IMU_ROW_Y + row_h - 2);
+  bool dist_l_installed = distance_sensorL.is_installed();
+  screen::set_pen(dist_l_installed ? pros::c::COLOR_GREEN : pros::c::COLOR_RED);
+  screen::fill_circle(190, IMU_ROW_Y + 8, 5);
+  screen::set_pen(COLOR_TEXT);
+  if(dist_l_installed){
+    snprintf(dist_buf, sizeof(dist_buf), "L %dmm", (int)distance_sensorL.get());
+  } else {
+    snprintf(dist_buf, sizeof(dist_buf), "L NA");
+  }
+  screen::print(TEXT_MEDIUM, 200, IMU_ROW_Y, "%s", dist_buf);
+
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(275, IMU_ROW_Y, 335, IMU_ROW_Y + row_h - 2);
+  bool dist_r_installed = distance_sensorR.is_installed();
+  screen::set_pen(dist_r_installed ? pros::c::COLOR_GREEN : pros::c::COLOR_RED);
+  screen::fill_circle(265, IMU_ROW_Y + 8, 5);
+  screen::set_pen(COLOR_TEXT);
+  if(dist_r_installed){
+    snprintf(dist_buf, sizeof(dist_buf), "R %dmm", (int)distance_sensorR.get());
+  } else {
+    snprintf(dist_buf, sizeof(dist_buf), "R NA");
+  }
+  screen::print(TEXT_MEDIUM, 275, IMU_ROW_Y, "%s", dist_buf);
+
+  // Button to (re)initialize/calibrate the IMU. Interior is cleared first --
+  // draw_rounded_rect_outline only paints the border, so without this a
+  // previous filled state (e.g. "CALIBRATING") would leave stale fill behind.
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(IMU_BTN_X0, IMU_BTN_Y0, IMU_BTN_X1, IMU_BTN_Y1);
+
+  const char* btn_text;
+  if(!imu_installed){
+    // Disabled look: no IMU to calibrate, so the button shouldn't read as actionable.
+    screen::set_pen(COLOR_SHADOW);
+    screen::set_eraser(COLOR_BG);
+    draw_rounded_rect_outline(IMU_BTN_X0, IMU_BTN_Y0, IMU_BTN_X1, IMU_BTN_Y1, 8);
+    screen::set_pen(COLOR_SHADOW);
+    btn_text = "NO IMU";
+  } else if(imu_calibrating){
+    // Filled with the same yellow as the status dot, so "in progress" reads consistently.
+    screen::set_pen(imu_color);
+    screen::set_eraser(imu_color);
     draw_rounded_rect_filled(IMU_BTN_X0, IMU_BTN_Y0, IMU_BTN_X1, IMU_BTN_Y1, 8);
-    screen::set_pen(pros::c::COLOR_WHITE);
+    screen::set_pen(pros::c::COLOR_BLACK);
+    btn_text = "CALIBRATING";
   } else {
     screen::set_pen(COLOR_BORDER);
     screen::set_eraser(COLOR_BG);
     draw_rounded_rect_outline(IMU_BTN_X0, IMU_BTN_Y0, IMU_BTN_X1, IMU_BTN_Y1, 8);
     screen::set_pen(COLOR_TEXT);
+    btn_text = "CALIBRATE";
   }
-  screen::print(TEXT_MEDIUM, IMU_BTN_X0 + 8, IMU_BTN_Y0 + 4, imu_calibrating ? "CALIBRATING" : "CALIBRATE");
+  screen::print(TEXT_MEDIUM, IMU_BTN_X0 + 8, IMU_BTN_Y0 + 4, "%s", btn_text);
 }
 
 void dashboard_draw_position_tab(){
   char buf[48];
 
+  // Clear the whole text block before redrawing (one generous rect, so a
+  // taller-than-expected line can't get clipped and vanish) so stale
+  // characters from a previous (longer) value can't linger either.
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(15, 55, 465, 200);
   screen::set_pen(COLOR_TEXT);
   screen::set_eraser(COLOR_BG);
 
@@ -415,6 +479,13 @@ void dashboard_draw_auton_tab(){
     int x1 = x0 + AUTON_BOX_W;
     int label_y = AUTON_BOX_Y + AUTON_BOX_H / 2 - 8;
 
+    // Clear the box's full bounding area (including the shadow a selected
+    // box draws) first -- an outline redraw only draws border lines, so
+    // without this the old fill/shadow from a previous selection lingers.
+    screen::set_pen(COLOR_BG);
+    screen::set_eraser(COLOR_BG);
+    screen::fill_rect(x0 - 1, AUTON_BOX_Y - 1, x1 + shadow_offset + 1, AUTON_BOX_Y + AUTON_BOX_H + shadow_offset + 1);
+
     if((int)selected_auton == i){
       screen::set_pen(COLOR_SHADOW);
       screen::set_eraser(COLOR_SHADOW);
@@ -436,10 +507,44 @@ void dashboard_draw_auton_tab(){
 
   char buf[32];
   snprintf(buf, sizeof(buf), "Selected: %s", labels[(int)selected_auton]);
+  int selected_line_y = AUTON_BOX_Y + AUTON_BOX_H + 25;
+  // Clear this line first -- a shorter label (e.g. "right" -> "left")
+  // wouldn't otherwise overwrite the previous text's trailing characters.
+  screen::set_pen(COLOR_BG);
+  screen::set_eraser(COLOR_BG);
+  screen::fill_rect(15, selected_line_y - 2, 300, selected_line_y + 18);
   screen::set_pen(COLOR_TEXT);
   screen::set_eraser(COLOR_BG);
-  screen::print(TEXT_MEDIUM, 20, AUTON_BOX_Y + AUTON_BOX_H + 25, "%s", buf);
+  screen::print(TEXT_MEDIUM, 20, selected_line_y, "%s", buf);
 }
+
+// SAO tab: a personalization image gallery you flip through with Back/Next
+// (SAO = Signature Autonomous Object, the customary VRC robot decoration).
+// Disabled -- see include/Template/display.h and src/Template/sao_gallery.cpp.
+// int sao_index = 0;
+//
+// const int SAO_IMAGE_Y = TAB_BAR_HEIGHT;
+// const int SAO_BTN_Y0 = SAO_IMAGE_Y + SAO_IMAGE_H + 4;
+// const int SAO_BTN_Y1 = 240 - 2;
+// const int SAO_BTN_W = 120;
+// const int SAO_BACK_X0 = 20;
+// const int SAO_BACK_X1 = SAO_BACK_X0 + SAO_BTN_W;
+// const int SAO_NEXT_X1 = 460;
+// const int SAO_NEXT_X0 = SAO_NEXT_X1 - SAO_BTN_W;
+//
+// void dashboard_draw_sao_tab(){
+//   screen::copy_area(0, SAO_IMAGE_Y, SAO_IMAGE_W - 1, SAO_IMAGE_Y + SAO_IMAGE_H - 1,
+//                      const_cast<uint32_t*>(sao_images[sao_index]), SAO_IMAGE_W);
+//
+//   screen::set_pen(COLOR_BORDER);
+//   screen::set_eraser(COLOR_BG);
+//   draw_rounded_rect_outline(SAO_BACK_X0, SAO_BTN_Y0, SAO_BACK_X1, SAO_BTN_Y1, 8);
+//   draw_rounded_rect_outline(SAO_NEXT_X0, SAO_BTN_Y0, SAO_NEXT_X1, SAO_BTN_Y1, 8);
+//   screen::set_pen(COLOR_TEXT);
+//   screen::print(TEXT_MEDIUM, SAO_BACK_X0 + 30, SAO_BTN_Y0 + 5, "BACK");
+//   screen::print(TEXT_MEDIUM, SAO_NEXT_X0 + 30, SAO_BTN_Y0 + 5, "NEXT");
+//   screen::print(TEXT_MEDIUM, 220, SAO_BTN_Y0 + 5, "%2d/%2d", sao_index + 1, SAO_IMAGE_COUNT);
+// }
 
 // Handles touch: switches tabs, and on the Auton Select tab, selects a routine.
 // Only reacts to the press transition (not held/repeat) so one tap = one action.
@@ -455,7 +560,7 @@ void dashboard_handle_touch(){
 
   if(touch.y < TAB_BAR_HEIGHT){
     int tab_index = touch.x / TAB_WIDTH;
-    if(tab_index >= 0 && tab_index <= 2){
+    if(tab_index >= 0 && tab_index <= 2){ // SAO tab disabled, see sao_gallery.cpp
       current_tab = (DisplayTab)tab_index;
     }
     return;
@@ -463,7 +568,7 @@ void dashboard_handle_touch(){
 
   if(current_tab == DisplayTab::MOTORS){
     if(touch.x >= IMU_BTN_X0 && touch.x <= IMU_BTN_X1 && touch.y >= IMU_BTN_Y0 && touch.y <= IMU_BTN_Y1){
-      if(!inertial.is_calibrating()){
+      if(inertial.is_installed() && !inertial.is_calibrating()){
         inertial.reset(false); // non-blocking: status flips to "calibrating" and the tab reflects it live
       }
     }
@@ -479,32 +584,74 @@ void dashboard_handle_touch(){
         break;
       }
     }
+    return;
   }
+
+  // SAO tab disabled, see sao_gallery.cpp
+  // if(current_tab == DisplayTab::SAO){
+  //   if(touch.y >= SAO_BTN_Y0 && touch.y <= SAO_BTN_Y1){
+  //     if(touch.x >= SAO_BACK_X0 && touch.x <= SAO_BACK_X1){
+  //       sao_index = (sao_index - 1 + SAO_IMAGE_COUNT) % SAO_IMAGE_COUNT;
+  //     } else if(touch.x >= SAO_NEXT_X0 && touch.x <= SAO_NEXT_X1){
+  //       sao_index = (sao_index + 1) % SAO_IMAGE_COUNT;
+  //     }
+  //   }
+  // }
 }
 
+// Redraws only what actually changed instead of blanking the whole content
+// area every loop -- clearing to black and immediately redrawing over it
+// each cycle is what caused the visible screen flashing.
+//
+// Touch is polled every 25ms (its own cheap read) so taps register quickly;
+// actual screen redrawing -- the expensive part -- is throttled separately
+// so a slow frame (e.g. the SAO image copy) can't delay the next touch read
+// and make the UI feel like it's dropping taps.
 void dashboard_task(){
+  DisplayTab prev_tab = (DisplayTab)-1;
+  AutonRoutine prev_auton = (AutonRoutine)-1;
+  // int prev_sao_index = -1; // SAO tab disabled, see sao_gallery.cpp
+  int frame = 0;
+
   while(true){
     dashboard_handle_touch();
 
-    screen::set_pen(pros::c::COLOR_BLACK);
-    screen::set_eraser(pros::c::COLOR_BLACK);
-    screen::fill_rect(0, TAB_BAR_HEIGHT, 480, 240);
+    bool tab_changed = current_tab != prev_tab;
+    bool live_tick = tab_changed || (frame % 3 == 0); // ~75ms cadence for live tabs
 
-    dashboard_draw_tab_bar();
+    if(tab_changed){
+      screen::set_pen(COLOR_BG);
+      screen::set_eraser(COLOR_BG);
+      screen::fill_rect(0, TAB_BAR_HEIGHT, 480, 240);
+      dashboard_draw_tab_bar();
+    }
 
     switch(current_tab){
       case DisplayTab::MOTORS:
-        dashboard_draw_motors_tab();
+        if(live_tick) dashboard_draw_motors_tab();
         break;
       case DisplayTab::POSITION:
-        dashboard_draw_position_tab();
+        if(live_tick) dashboard_draw_position_tab();
         break;
       case DisplayTab::AUTON_SELECT:
-        dashboard_draw_auton_tab();
+        if(tab_changed || selected_auton != prev_auton){
+          dashboard_draw_auton_tab();
+        }
         break;
+      // SAO tab disabled, see sao_gallery.cpp
+      // case DisplayTab::SAO:
+      //   if(tab_changed || sao_index != prev_sao_index){
+      //     dashboard_draw_sao_tab();
+      //   }
+      //   break;
     }
 
-    delay(50);
+    prev_tab = current_tab;
+    prev_auton = selected_auton;
+    // prev_sao_index = sao_index; // SAO tab disabled, see sao_gallery.cpp
+    frame++;
+
+    delay(25);
   }
 }
 

@@ -22,9 +22,14 @@ extern MotorGroup rightMotors;
 extern Motor intake;
 extern Motor cascade1;
 extern Motor cascade2;
+extern Motor arm;
 
 extern adi::DigitalOut claw1;
 extern adi::DigitalOut claw2;
+extern adi::DigitalOut toggle;
+
+extern Distance distance_sensorL;
+extern Distance distance_sensorR;
 
 extern lemlib::Drivetrain drivetrain;
 extern lemlib::OdomSensors sensors;

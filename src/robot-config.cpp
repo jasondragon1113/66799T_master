@@ -1,15 +1,15 @@
 #include "main.h"
 
-IMU inertial(18);
+IMU inertial(17);
 Rotation fwd_tracker(2); // I just put a random number here but we dont have a forward tracker
 Rotation sideways_tracker(1);  // I just put a random number here but we dont have a sideways tracker
 
 // 66799T Worlds
 // negative port number means reversed (there is no separate "reversed" constructor argument)
 Motor leftFront(-3, MotorGears::blue);
-Motor leftMiddle(20, MotorGears::blue);
+Motor leftMiddle(16, MotorGears::blue);
 Motor leftBack(6, MotorGears::green);
-Motor rightFront(19, MotorGears::blue);
+Motor rightFront(15, MotorGears::blue);
 Motor rightMiddle(-8, MotorGears::blue);
 Motor rightBack(-1, MotorGears::green);
 
@@ -17,14 +17,16 @@ MotorGroup leftMotors({leftFront.get_port(), leftMiddle.get_port(), leftBack.get
 MotorGroup rightMotors({rightFront.get_port(), rightMiddle.get_port(), rightBack.get_port()});
 
 Motor intake(-5, MotorGears::green);
-Motor cascade1(7, MotorGears::green);
-Motor cascade2(-2, MotorGears::green);
+Motor cascade1(-7, MotorGears::green);
+Motor cascade2(2, MotorGears::green);
+Motor arm(18, MotorGears::green);
 
-adi::DigitalOut claw1('F');
+adi::DigitalOut claw1('H');
 adi::DigitalOut claw2('G');
+adi::DigitalOut toggle('F');
 
-Distance distance_sensorL(11);
-Distance distance_sensorR(9);
+Distance distance_sensorL(4);
+Distance distance_sensorR(20);
 
 
 
@@ -158,6 +160,7 @@ void init() {
     delay(2500); // wait for imu to calibrate
     // chassis_lemlib.calibrate(); // TODO: THIS MIGHT BE NEEDED FOR LEMLIB TO WORK! But if this is called, the DriveR.get_position() and DriveL.get_position() units become not degrees anymore for some reason, which breaks my odometry. 
     start_dashboard();
+    start_arm_task();
     // static Task screen_task(map_task);
     // Controller(CONTROLLER_MASTER).rumble("..");
 }

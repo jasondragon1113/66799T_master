@@ -695,6 +695,18 @@ void Drive::turn_to_point(float X_position, float Y_position, float extra_angle_
 
 
 
+// Cascade never allowed to extend past this (motor degrees, measured from the
+// tare_position() at the start of control_arcade() below). Small placeholder
+// -- tune once the real extend limit has been tested.
+const int CASCADE_EXTEND_LIMIT_DEG = 3900;
+
+// RIGHT/LEFT button cascade targets (paired with the arm going to POS_1/POS_2
+// respectively). Change these values to retarget.
+int CASCADE_PRESET_DEG = 312;       // RIGHT -> ArmPosition::POS_1, first cascade move
+int CASCADE_PRESET_2_DEG = 512;     // LEFT  -> ArmPosition::POS_2
+int CASCADE_RIGHT_FINAL_DEG = 300;  // RIGHT -> cascade's 2nd move, once the arm settles
+const int CASCADE_MOVE_VELOCITY = 117; // move_absolute() speed, out of 200 rpm
+
 /**
  * Controls a chassis with left stick throttle and right stick turning.
  * Default deadband is 5.
@@ -705,13 +717,16 @@ void Drive::control_arcade(){
   double turn = 0;
   bool bt_y=false , last_bt_y=false, bumper_bt_y=false;
   bool bt_a=false , last_bt_a=false, bumper_bt_a=false;
+  bool bt_b=false , last_bt_b=false, bumper_bt_b=false;
   bool bt_Right=false , last_bt_Right=false, bumper_bt_Right=false;
   bool bt_R2=false , last_bt_R2=false, bumper_bt_R2=false;
   bool bt_L2=false , last_bt_L2=false, bumper_bt_L2=false;
-  bool bt_X=false , last_bt_X=false, bumper_bt_X=false;
+  bool bt_x=false , last_bt_x=false, bumper_bt_x=false;
   bool bt_up=false , last_bt_up=false, bumper_bt_up=false;
   bool bt_down=false , last_bt_down=false, bumper_bt_down=false;
+  bool bt_Left=false , last_bt_Left=false;
   bool outtake_wait = false;
+  bool cascade_preset_active = false;
   // Task in_fxn(intake_status);
   chassis.drive_stop(MotorBrake::coast);
 
@@ -735,9 +750,14 @@ void Drive::control_arcade(){
   DriveL.move(throttle + turn);
   DriveR.move(throttle - turn);
 
+  // Brake mode is deliberately sticky when both sticks are back at center:
+  // letting go of turn should hold the heading you just turned to (stays
+  // BRAKE), while letting go of throttle should let the chassis roll to a
+  // stop (stays COAST) -- whichever axis was last active wins and persists
+  // until the other axis takes over.
   if(fabs(turn)>5){
     chassis.DriveL.set_brake_mode(pros::E_MOTOR_BRAKE_BRAKE);
-    chassis.DriveR.set_brake_mode(pros::E_MOTOR_BRAKE_BRAKE); 
+    chassis.DriveR.set_brake_mode(pros::E_MOTOR_BRAKE_BRAKE);
   }
   else if(fabs(throttle)>5){
     chassis.DriveL.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
@@ -749,6 +769,12 @@ void Drive::control_arcade(){
     if(!bt_a and last_bt_a){
       bumper_bt_a = !bumper_bt_a;
       }
+    last_bt_a = bt_a;
+    bt_b = master.get_digital(DIGITAL_B);
+    if(!bt_b and last_bt_b){
+      bumper_bt_b = !bumper_bt_b;
+      }
+    last_bt_b = bt_b;
     // bt_Right = master.get_digital(DIGITAL_RIGHT);
     // if(!bt_Right and last_bt_Right){
     //   bumper_bt_Right = !bumper_bt_Right;
@@ -761,10 +787,11 @@ void Drive::control_arcade(){
     // if(!bt_L2 and last_bt_L2){
     //   bumper_bt_L2 = !bumper_bt_L2;
     //   }
-    // bt_X = master.get_digital(DIGITAL_X);
-    // if(!bt_X and last_bt_X){
-    //   bumper_bt_X = !bumper_bt_X;
-    //   }
+    bt_x = master.get_digital(DIGITAL_X);
+    if(!bt_x and last_bt_x){
+      bumper_bt_x = !bumper_bt_x;
+      }
+    last_bt_x = bt_x;
     // bt_up = master.get_digital(DIGITAL_UP);
     // if(!bt_up and last_bt_up){
     //   bumper_bt_up = !bumper_bt_up;
@@ -775,10 +802,12 @@ void Drive::control_arcade(){
     //   }
 
     //bt
-    // lift.set_value(bumper_bt_X);
-    // last_bt_X = bt_X;
+    // claw1.set_value(bt_a);
+    // last_bt_a = bt_a;
 
-    claw1.set_value(!bt_R2);
+    claw1.set_value(bumper_bt_a);
+    claw2.set_value(bumper_bt_b);
+    toggle.set_value(bumper_bt_x);
 
     //intake
     if(master.get_digital(DIGITAL_R1)){
@@ -788,24 +817,73 @@ void Drive::control_arcade(){
       intake.move(-127);
     }
     else if (master.get_digital(DIGITAL_L1)){
-      cascade1.move(127);
-      cascade2.move(127);
+      cascade_preset_active = false;
+      if(cascade1.get_position() >= CASCADE_EXTEND_LIMIT_DEG || cascade2.get_position() >= CASCADE_EXTEND_LIMIT_DEG){
+        cascade1.move(0);
+        cascade2.move(0);
+      }
+      else{
+        cascade1.move(100);
+        cascade2.move(100);
+      }
     }
     else if(master.get_digital(DIGITAL_L2)){
+      cascade_preset_active = false;
       if(cascade1.get_position() <= 0 || cascade2.get_position() <= 0){
         cascade1.move(0);
         cascade2.move(0);
       }
       else{
-        cascade1.move(-100);
-        cascade2.move(-100);
+        cascade1.move(-97);
+        cascade2.move(-97);
       }
     }
     else{
       intake.move(0);
-      cascade1.move(0);
-      cascade2.move(0);
+      if(!cascade_preset_active){
+        cascade1.move(0);
+        cascade2.move(0);
+      }
     }
+
+    bt_Right = master.get_digital(DIGITAL_RIGHT);
+    if(bt_Right and !last_bt_Right){
+      cascade_preset_active = true;
+      cascade1.move_absolute(CASCADE_PRESET_DEG, CASCADE_MOVE_VELOCITY);
+      cascade2.move_absolute(CASCADE_PRESET_DEG, CASCADE_MOVE_VELOCITY);
+      arm_set_position(ArmPosition::POS_1);
+      claw2.set_value(false);
+      // Runs on its own task so waiting for the arm doesn't block the rest
+      // of control_arcade() (drive, intake, other buttons).
+      pros::Task([]{
+        while(!arm_settled){
+          pros::delay(10);
+        }
+        cascade1.move_absolute(CASCADE_RIGHT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
+        cascade2.move_absolute(CASCADE_RIGHT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
+      });
+    }
+    last_bt_Right = bt_Right;
+
+    bt_down = master.get_digital(DIGITAL_DOWN);
+    if(bt_down and !last_bt_down){
+      arm_set_position(ArmPosition::DOWN);
+    }
+    last_bt_down = bt_down;
+
+    bt_Left = master.get_digital(DIGITAL_LEFT);
+    if(bt_Left and !last_bt_Left){
+      arm_set_position(ArmPosition::POS_2);
+      cascade_preset_active = true;
+      // Runs on its own task so the 500ms wait doesn't block the rest of
+      // control_arcade() (drive, intake, other buttons).
+      pros::Task([]{
+        pros::delay(500);
+        cascade1.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
+        cascade2.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
+      });
+    }
+    last_bt_Left = bt_Left;
   }
 }
 

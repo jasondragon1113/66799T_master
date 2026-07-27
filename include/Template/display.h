@@ -17,7 +17,8 @@ void map_task();
 enum class DisplayTab {
     MOTORS = 0,
     POSITION = 1,
-    AUTON_SELECT = 2
+    AUTON_SELECT = 2,
+    // SAO = 3, // SAO tab disabled, see sao_gallery.cpp
 };
 
 enum class AutonRoutine {
@@ -35,3 +36,11 @@ void dashboard_draw_tab_bar();
 void dashboard_draw_motors_tab();
 void dashboard_draw_position_tab();
 void dashboard_draw_auton_tab();
+// void dashboard_draw_sao_tab(); // SAO tab disabled, see sao_gallery.cpp
+
+// SAO gallery: desktop screenshots you can flip through with Back/Next (see sao_gallery.cpp).
+// Disabled -- sao_gallery.cpp body is wrapped in #if 0.
+// extern const int SAO_IMAGE_W;
+// extern const int SAO_IMAGE_H;
+// extern const int SAO_IMAGE_COUNT;
+// extern const uint32_t* const sao_images[];
