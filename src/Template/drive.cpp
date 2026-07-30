@@ -762,6 +762,13 @@ static bool preset_still_owns(int seq_id){
 // ——不震的話，機器人只是安靜地停在半路，看起來像壞掉。
 static void preset_abort(){
   cascade_preset_active = false;
+  // Park the cascade where it actually is. We just proved it cannot reach the
+  // target it was given, so leaving that target in place would have the PID
+  // leaning on it forever -- and once kP is tuned up, "leaning forever" means a
+  // stalled motor pulling stall current until something gives.
+  // 中文：把目標設回它現在的位置。剛剛已經證明它到不了原本的目標，還留著那個目標的話
+  // PID 會一直死推——kP 調高之後，「一直死推」就是馬達堵轉、電流一路吃到燒東西。
+  cascade_set_target(cascade_get_position_deg());
   // Drive::master is private and this is a free function, so buzz the master
   // controller through the plain C API -- same controller, no class changes.
   // 中文：Drive 裡的 master 是 private、這裡又是自由函式，所以改用 C 版 API 讓同一
@@ -796,7 +803,13 @@ static bool cascade_wait_settled(int seq_id, int target_deg){
 }
 
 // Wait for the arm to reach whatever target was last set with
-// arm_set_position(). Same cancellation contract as cascade_wait_settled().
+// arm_set_position(). Same contract as cascade_wait_settled(), timeout included:
+// in the LEFT sequence the step after this one retracts the cascade to 0, and
+// doing that while the arm is stuck halfway up is the same two mechanisms
+// hitting each other from the other direction. So a timeout aborts too.
+// 中文：等手臂到位，規則跟 cascade_wait_settled() 一樣，逾時也一樣。LEFT 序列的下一步
+// 是把 cascade 收回 0，手臂卡在半路時做那一步，就是同樣兩個機構從另一邊互撞——所以
+// 等不到手臂也要中止。
 static bool arm_wait_settled(int seq_id){
   delay(ARM_SETTLE_LATENCY_MS);
   int waited_ms = 0;
@@ -804,7 +817,10 @@ static bool arm_wait_settled(int seq_id){
     if(!preset_still_owns(seq_id)) return false;
     delay(10);
     waited_ms += 10;
-    if(waited_ms > PRESET_STEP_TIMEOUT_MS) break;
+    if(waited_ms > PRESET_STEP_TIMEOUT_MS){
+      preset_abort();
+      return false;
+    }
   }
   return preset_still_owns(seq_id);
 }
