@@ -131,7 +131,13 @@ void initialize() {
 	// NOTE: port 11 is also used by distance_sensorL in robot-config.cpp — a
 	// smart port can host only one device, so move one of them if both are wired.
 	// Smart Port path leaves stdout free (printf still works); HUD off by default.
-	vexdash::init_smartport(11, 115200);
+	// 921600 must match the ESP32 bridge firmware exactly (official firmware
+	// moved off 115200 on 2026-07-25 for headroom). If the dashboard suddenly
+	// can't connect after this build: re-flash the ESP32 with the latest
+	// ESP_32_WIFI.ino — an old 115200 bridge cannot talk to this baud rate.
+	// 中文：921600 要跟 ESP32 橋韌體完全一致（官方韌體 7/25 起改 921600）。
+	// 燒了這版之後 dashboard 連不上＝ESP32 還是舊韌體，重燒最新 ESP_32_WIFI.ino 即可。
+	vexdash::init_smartport(11, 921600);
 
 	// HOLD so the arm stays put under gravity when no button is pressed
 	// (arm_task() would normally set this, but it's disabled above).

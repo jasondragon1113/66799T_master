@@ -456,3 +456,10 @@ g++ -std=c++20 -D_USE_MATH_DEFINES -DPID_TUNE_PROGRAM -fsyntax-only -w -Iinclude
 
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+## 七、鮑率升級 921600（2026-07-30 追加）
+
+車端已改 `init_smartport(11, 921600)`。**燒這版之前，ESP32 必須先重燒最新橋韌體**
+（`V5 Dashboard/examples/ESP-32/ESP_32_WIFI/ESP_32_WIFI.ino`，7/25 之後的版本＝921600）。
+兩邊要同一天一起換——只換一邊 dashboard 會一直「連線中」連不上。
+判斷法：燒完車端後 dashboard 連不上＝ESP32 還是舊 115200 韌體，重燒即可。
