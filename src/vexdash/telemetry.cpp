@@ -10,7 +10,8 @@ namespace vexdash {
 Telemetry::Telemetry(ITransport& transport) : transport_(transport) {}
 
 bool Telemetry::send_channel_def(ChannelId id, const char* name, ValueType value_type, const char* unit,
-                                  int device_port, const char* const* labels, std::size_t label_count) {
+                                  int device_port, const char* const* labels, std::size_t label_count,
+                                  const char* path) {
   std::size_t name_len = std::strlen(name);
   std::size_t unit_len = std::strlen(unit);
   if (name_len > kMaxNameLen || unit_len > kMaxUnitLen) {
@@ -19,6 +20,10 @@ bool Telemetry::send_channel_def(ChannelId id, const char* name, ValueType value
 
   bool has_device_port = device_port >= 0;
   bool has_enum_labels = labels != nullptr && label_count > 0;
+  // v1.4 (§5.3): nullptr and "" both mean "not declared" -- the field (and its
+  // flag bit) is omitted entirely, keeping the frame byte-identical to v1.3.
+  std::size_t path_len = (path != nullptr) ? std::strlen(path) : 0;
+  bool has_path = path_len > 0;
 
   // Validate v1.1 enum-label bounds up front (protocol.md §5.3).
   if (has_enum_labels) {
@@ -28,6 +33,7 @@ bool Telemetry::send_channel_def(ChannelId id, const char* name, ValueType value
     }
   }
   if (has_device_port && device_port > 0xFF) return false;
+  if (path_len > kMaxPathLen) return false;
 
   // Payload is bounded by the 512-byte frame limit (protocol.md §2.2); size
   // the buffer accordingly and let ByteWriter/frame_encode reject overflow.
@@ -38,13 +44,17 @@ bool Telemetry::send_channel_def(ChannelId id, const char* name, ValueType value
   w.write_string_u8len(name, name_len);
   w.write_string_u8len(unit, unit_len);
 
-  // v1.1 extension bytes (protocol.md §5.3) -- only emitted when needed, so
-  // a plain channel with no device_port / no labels stays byte-identical to
-  // the v1 CHANNEL_DEF encoding (backward compatible on the wire).
-  if (has_device_port || has_enum_labels) {
+  // Extension bytes (protocol.md §5.3) -- only emitted when needed, so a
+  // plain channel with no device_port / no labels / no path stays
+  // byte-identical to the v1 CHANNEL_DEF encoding (backward compatible on
+  // the wire). Fields go out in flag-bit order (§6.7): device_port (bit0,
+  // v1.1) -> enum_labels (bit1, v1.1) -> path (bit2, v1.4), so a decoder
+  // that only knows the older bits stops early and ignores the tail.
+  if (has_device_port || has_enum_labels || has_path) {
     std::uint8_t v11_flags = 0;
     if (has_device_port) v11_flags |= kChannelFlagHasDevicePort;
     if (has_enum_labels) v11_flags |= kChannelFlagHasEnumLabels;
+    if (has_path) v11_flags |= kChannelFlagHasPath;
     w.write_u8(v11_flags);
     if (has_device_port) {
       w.write_u8(static_cast<std::uint8_t>(device_port));
@@ -54,6 +64,9 @@ bool Telemetry::send_channel_def(ChannelId id, const char* name, ValueType value
       for (std::size_t i = 0; i < label_count; ++i) {
         w.write_string_u8len(labels[i], std::strlen(labels[i]));
       }
+    }
+    if (has_path) {
+      w.write_string_u8len(path, path_len);
     }
   }
 
@@ -87,6 +100,11 @@ ChannelId Telemetry::declare_channel_ex(const char* name, ValueType value_type, 
   }
 
   int device_port = opt.has_device_port() ? opt.device_port : -1;
+  // v1.4: nullptr/"" collapse to "no path field" inside send_channel_def.
+  const char* path = opt.has_path() ? opt.path : nullptr;
+  if (path != nullptr && std::strlen(path) > kMaxPathLen) {
+    return kInvalidChannelId;
+  }
 
   // Idempotent re-declaration: if a channel with this name already exists
   // (e.g. register_all() replayed on reconnect), reuse its id and re-send
@@ -95,7 +113,7 @@ ChannelId Telemetry::declare_channel_ex(const char* name, ValueType value_type, 
   ChannelId existing = find_channel_by_name(name);
   if (existing != kInvalidChannelId) {
     channels_[existing].value_type = value_type;  // update in case it changed
-    if (!send_channel_def(existing, name, value_type, unit, device_port, nullptr, 0)) {
+    if (!send_channel_def(existing, name, value_type, unit, device_port, nullptr, 0, path)) {
       return kInvalidChannelId;
     }
     return existing;
@@ -105,7 +123,7 @@ ChannelId Telemetry::declare_channel_ex(const char* name, ValueType value_type, 
     return kInvalidChannelId;
   }
   ChannelId id = static_cast<ChannelId>(channel_count_);
-  if (!send_channel_def(id, name, value_type, unit, device_port, nullptr, 0)) {
+  if (!send_channel_def(id, name, value_type, unit, device_port, nullptr, 0, path)) {
     return kInvalidChannelId;
   }
 
@@ -116,8 +134,12 @@ ChannelId Telemetry::declare_channel_ex(const char* name, ValueType value_type, 
 }
 
 ChannelId Telemetry::declare_enum_channel(const char* name, const char* const* labels,
-                                           std::size_t label_count, int device_port, const char* unit) {
+                                           std::size_t label_count, int device_port, const char* unit,
+                                           const char* path) {
   if (std::strlen(name) > kMaxNameLen || std::strlen(unit) > kMaxUnitLen) {
+    return kInvalidChannelId;
+  }
+  if (path != nullptr && std::strlen(path) > kMaxPathLen) {
     return kInvalidChannelId;
   }
 
@@ -125,7 +147,7 @@ ChannelId Telemetry::declare_enum_channel(const char* name, const char* const* l
   ChannelId existing = find_channel_by_name(name);
   if (existing != kInvalidChannelId) {
     channels_[existing].value_type = ValueType::kEnum;
-    if (!send_channel_def(existing, name, ValueType::kEnum, unit, device_port, labels, label_count)) {
+    if (!send_channel_def(existing, name, ValueType::kEnum, unit, device_port, labels, label_count, path)) {
       return kInvalidChannelId;
     }
     return existing;
@@ -135,7 +157,7 @@ ChannelId Telemetry::declare_enum_channel(const char* name, const char* const* l
     return kInvalidChannelId;
   }
   ChannelId id = static_cast<ChannelId>(channel_count_);
-  if (!send_channel_def(id, name, ValueType::kEnum, unit, device_port, labels, label_count)) {
+  if (!send_channel_def(id, name, ValueType::kEnum, unit, device_port, labels, label_count, path)) {
     return kInvalidChannelId;
   }
 

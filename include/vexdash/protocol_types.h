@@ -94,9 +94,18 @@ constexpr std::size_t kMaxUnitLen = 15;
 constexpr std::size_t kMaxEnumLabels = 64;
 constexpr std::size_t kMaxEnumLabelLen = 31;
 
-// protocol.md §5.3 (v1.1): CHANNEL_DEF v11_flags bits.
+// protocol.md §5.3: CHANNEL_DEF v11_flags bits. bit0/bit1 are v1.1; bit2 is
+// v1.4. Optional fields appear on the wire in bit order (device_port ->
+// enum_labels -> path), so a decoder that only knows bit0/bit1 stops after
+// enum_labels and naturally ignores the trailing path bytes (§6.7).
 constexpr std::uint8_t kChannelFlagHasDevicePort = 0x01;
 constexpr std::uint8_t kChannelFlagHasEnumLabels = 0x02;
+constexpr std::uint8_t kChannelFlagHasPath = 0x04;  // v1.4
+
+// protocol.md §5.6/§5.3: `path`-class fields (CONFIG_SCHEMA path since v1,
+// CHANNEL_DEF path since v1.4) capped at 63 bytes, same as name-class fields.
+// 中文：分組路徑上限 63 bytes，與 name 同級；CHANNEL_DEF 的 path 是 v1.4 新增。
+constexpr std::size_t kMaxPathLen = 63;
 
 // protocol.md §5.12 (v1.1): DEVICE_MAP entry name cap (63 bytes, same as
 // other name-class fields).
@@ -122,18 +131,29 @@ enum class DeviceType : std::uint8_t {
 // protocol.md §5.13 (v1.3): DEVICE_STATUS per-type standard value set. Returns
 // how many f32 values a DEVICE_STATUS entry carries for a given observed
 // DeviceType, in the canonical wire order documented in §5.13:
-//   MOTOR   -> 3 : temperature(C), power(W), current(mA)
+//   MOTOR   -> 4 : temperature(C), power(W), current(mA), rpm(RPM)  [widened v1.3, WS10-F]
 //   ROTATION-> 2 : angle(centideg, absolute), position(centideg, cumulative)
 //   DISTANCE-> 2 : distance(mm), confidence(0-63)
 //   OPTICAL -> 3 : hue(0-359.999 deg), proximity(0-255), brightness(0-1.0)
 //   IMU     -> 3 : heading([0,360) deg), pitch((-180,180) deg), roll((-180,180) deg)
 //   BATTERY -> 4 : voltage(mV), current(mA), capacity(%), temperature(C)  [v1.3, WS10-D]
 // Any other type has no defined value set -> 0 (such a device is NOT emitted).
+// WS10-F note: MOTOR's value_count widened 3->4 (rpm appended at the END of the
+// existing order, not inserted in the middle) so a pre-WS10-F decoder that only
+// reads indices 0-2 is unaffected, and a post-WS10-F decoder talking to a
+// pre-WS10-F robot (value_count=3) simply sees no index 3 (undefined) -- this
+// constant is the CURRENT firmware's contract, used by DeviceStatus::add_entry
+// to validate the caller's value_count on the SENDING side only; it does not
+// gate what a decoder must accept on the wire (see protocol.md §5.13 forward-
+// compat bullets for the receiving-side story, which lives in dashboard TS).
 // 中文：某型別在 DEVICE_STATUS 裡帶幾個 f32 值（順序即 §5.13 契約）；對不上的型別回 0＝不發。
+// WS10-F：rpm 加在馬達值集「最後面」而非插在中間，故舊解碼器忽略多出的 index 3、新解碼器遇舊韌體
+// （value_count=3）自然讀到 index 3 為 undefined，兩向皆零破壞（此常數只管本韌體「發送時」的驗證，
+// 不限制解碼端接受哪些 value_count）。
 constexpr std::uint8_t device_status_value_count(DeviceType t) {
   switch (t) {
     case DeviceType::kMotor:
-      return 3;  // temperature, power, current
+      return 4;  // temperature, power, current, rpm (WS10-F)
     case DeviceType::kRotation:
       return 2;  // angle (absolute), position (cumulative)
     case DeviceType::kDistance:
@@ -149,9 +169,10 @@ constexpr std::uint8_t device_status_value_count(DeviceType t) {
   }
 }
 
-// protocol.md §5.13: the largest per-type value_count above (BATTERY carries 4,
-// the widest; MOTOR/OPTICAL/IMU carry 3). Lets the PROS-side value reader size
-// its output buffer statically. 中文：值集最大長度（電池 4 為最寬），供讀取端靜態配置緩衝。
+// protocol.md §5.13: the largest per-type value_count above (BATTERY and MOTOR
+// [WS10-F] both carry 4, the widest; OPTICAL/IMU carry 3). Lets the PROS-side
+// value reader size its output buffer statically. 中文：值集最大長度（電池與馬達
+// [WS10-F 起] 皆為 4，最寬），供讀取端靜態配置緩衝。
 constexpr std::uint8_t kMaxDeviceStatusValues = 4;
 
 // Returns the inline wire size in bytes of a value of the given ValueType

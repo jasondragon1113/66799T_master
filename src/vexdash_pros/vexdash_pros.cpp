@@ -22,6 +22,10 @@ namespace {
 // 走訪它做上報取樣。
 WatchRegistry g_registry;
 
+// 方案 A：全域自訂按鈕登記表（同上，無 heap）。declare_command() 往這張表登記；
+// 跟 g_registry 一樣由 default_register() 走訪做（重連也會走的）idempotent 註冊。
+CommandRegistry g_command_registry;
+
 // 方案 A 的裝置掃描器（DEVICE_MAP 自動化，票 WS9）。掃 21 個智慧埠、記快照、偵測
 // 插拔——純邏輯在 host 可測的 DeviceScanner，這裡只補上唯一碰 PROS 的讀埠函式。
 DeviceScanner g_device_scanner;
@@ -41,9 +45,10 @@ int read_plugged(std::uint8_t pros_port_0based, void*) {
 // 依「實測型別」讀該型別的標準值集，寫進 out[]、回傳寫入幾個（順序＝§5.13 契約）。
 // 簽名不含 PROS 型別，故 DeviceScanner::send_status 的調度邏輯在 host 可測；本函式
 // 只在 PROS 專案內編譯（host build 不含本檔）。每個 getter 的 header 出處與單位：
-//   MOTOR    temperature = pros/motors.h:790 motor_get_temperature  -> °C   (double)
-//            power       = pros/motors.h:763 motor_get_power        -> W    (double)
-//            current     = pros/motors.h:423 motor_get_current_draw -> mA   (int32)
+//   MOTOR    temperature = pros/motors.h:790 motor_get_temperature       -> °C   (double)
+//            power       = pros/motors.h:763 motor_get_power             -> W    (double)
+//            current     = pros/motors.h:423 motor_get_current_draw      -> mA   (int32)
+//            rpm         = pros/motors.h:396 motor_get_actual_velocity   -> RPM  (double)  [WS10-F]
 //   ROTATION angle(絕對) = pros/rotation.h:247 rotation_get_angle    -> centideg 0..36000 (int32)
 //            position(相對/累計) = pros/rotation.h:193 rotation_get_position -> centideg (int32)
 //   DISTANCE distance    = pros/distance.h:64  distance_get          -> mm   (int32)
@@ -60,6 +65,9 @@ int read_plugged(std::uint8_t pros_port_0based, void*) {
 //            temperature = pros/misc.h:769 battery_get_temperature -> °C  (double)
 //   （WS10-D 電池：非 smart port，wire port=0，永遠送；battery_get_* 的 header 註解未明寫單位，
 //     單位由回傳型別 int32=milli-單位/double=%,°C ＋ VEXos 原生行為推定，與馬達 current 同用 mA 一致）
+//   （WS10-F 馬達 rpm：motor_get_actual_velocity 的 header doxygen 明寫「回傳 RPM」，故直接引用，非推定。
+//     可為負值＝實際轉向；「負埠號使回傳值變號」是給反轉安裝馬達的既有 PROS 慣例，與此處讀值邏輯無關，
+//     車端一律照 motor_get_actual_velocity 原樣回傳，不額外處理正負。）
 // 單位一律送 PROS 原生值（不換算），前端要顯示成 A/度/V 自行除；縮放取捨見 protocol.md §5.13。
 std::uint8_t read_device_values(std::uint8_t wire_port, DeviceType observed_type, float* out,
                                 std::uint8_t max_out, void*) {
@@ -75,11 +83,15 @@ std::uint8_t read_device_values(std::uint8_t wire_port, DeviceType observed_type
       out[3] = static_cast<float>(pros::c::battery_get_temperature());  // °C
       return 4;
     case DeviceType::kMotor:
-      if (max_out < 3) return 0;
+      // WS10-F: value set widened 3->4 (append rpm at the END, see
+      // protocol_types.h device_status_value_count() comment on why appending
+      // rather than inserting keeps this forward/backward compatible).
+      if (max_out < 4) return 0;
       out[0] = static_cast<float>(pros::c::motor_get_temperature(static_cast<std::int8_t>(port)));
       out[1] = static_cast<float>(pros::c::motor_get_power(static_cast<std::int8_t>(port)));
       out[2] = static_cast<float>(pros::c::motor_get_current_draw(static_cast<std::int8_t>(port)));
-      return 3;
+      out[3] = static_cast<float>(pros::c::motor_get_actual_velocity(static_cast<std::int8_t>(port)));  // RPM
+      return 4;
     case DeviceType::kRotation:
       if (max_out < 2) return 0;
       out[0] = static_cast<float>(pros::c::rotation_get_angle(port));     // 絕對 centideg
@@ -113,6 +125,7 @@ std::uint8_t read_device_values(std::uint8_t wire_port, DeviceType observed_type
 // 同款週期重送策略），確保初始快照就算掉一幀也會在下個自癒週期補回。
 void default_register(Session& s, void*) {
   g_registry.declare_all(s);
+  g_command_registry.declare_all(s);
   if (g_device_scan_enabled) {
     g_device_scanner.scan(&read_plugged, nullptr);
     g_device_scanner.send(s.device_map());
@@ -238,17 +251,17 @@ bool is_initialized() { return g_initialized; }
 // FIX-2（2026-07-19 前置修繕，見 LULU WIRING-STUDIO 盤點）：這幾個門面原本是 void，
 // 把 WatchRegistry::add()/add_config() 的 bool 回傳值直接丟棄——表滿/nullptr/空名/
 // 超長名全無訊號。現在照實透傳，呼叫端仍可忽略回傳值（不破壞既有相容性）。
-bool watch(const char* name, double* value, const char* unit, int device_port) {
-  return g_registry.add(name, value, unit, device_port);
+bool watch(const char* name, double* value, const char* unit, int device_port, const char* path) {
+  return g_registry.add(name, value, unit, device_port, path);
 }
-bool watch(const char* name, float* value, const char* unit, int device_port) {
-  return g_registry.add(name, value, unit, device_port);
+bool watch(const char* name, float* value, const char* unit, int device_port, const char* path) {
+  return g_registry.add(name, value, unit, device_port, path);
 }
-bool watch(const char* name, std::int32_t* value, const char* unit, int device_port) {
-  return g_registry.add(name, value, unit, device_port);
+bool watch(const char* name, std::int32_t* value, const char* unit, int device_port, const char* path) {
+  return g_registry.add(name, value, unit, device_port, path);
 }
-bool watch(const char* name, bool* value, const char* unit, int device_port) {
-  return g_registry.add(name, value, unit, device_port);
+bool watch(const char* name, bool* value, const char* unit, int device_port, const char* path) {
+  return g_registry.add(name, value, unit, device_port, path);
 }
 
 bool watch_config(const char* name, double* value, const char* group) {
@@ -264,7 +277,7 @@ bool watch_config(const char* name, bool* value, const char* group) {
   return g_registry.add_config(name, value, group);
 }
 
-bool watch_motor(const char* name, pros::Motor& motor) {
+bool watch_motor(const char* name, pros::Motor& motor, const char* path) {
   // 一次登記整顆馬達的常用遙測；頻道名為 "<name>.pos/.rpm/.temp/.amp"，自動帶上
   // 馬達的 device_port（讓 dashboard 把這幾條線歸到同一顆馬達下）。
   const int port = static_cast<int>(motor.get_port());
@@ -284,9 +297,17 @@ bool watch_motor(const char* name, pros::Motor& motor) {
   bool ok = true;
   for (const auto& c : chans) {
     std::snprintf(buf, sizeof(buf), "%s.%s", name, c.suffix);
-    ok = g_registry.add_fn(buf, c.fn, &motor, c.unit, port) && ok;
+    ok = g_registry.add_fn(buf, c.fn, &motor, c.unit, port, path) && ok;
   }
   return ok;
+}
+
+bool declare_command(const char* name, CommandHandler handler, bool requires_confirm, void* user_data) {
+  return g_command_registry.add(name, handler, requires_confirm, user_data);
+}
+
+bool set_pose(double x_mm, double y_mm, double heading_rad) {
+  return g_session->field().set_pose(x_mm, y_mm, heading_rad);
 }
 
 }  // namespace vexdash

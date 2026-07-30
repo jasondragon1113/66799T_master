@@ -17,8 +17,9 @@
 //                               // all samples put() since the last flush
 //
 // Usage pattern (v1.1 device-aware / text / enum):
-//   ChannelOptions opt;                        // opt-in v1.1 extensions
+//   ChannelOptions opt;                        // opt-in v1.1/v1.4 extensions
 //   opt.device_port = 3;                       // attribute to smart port 3
+//   opt.path = "drive/pid";                    // v1.4: declare the mechanism
 //   auto temp = telemetry.declare_channel_ex("temp", ValueType::kF64, "C", opt);
 //
 //   const char* labels[] = {"none", "motor", "rotation"};
@@ -46,7 +47,7 @@ constexpr std::size_t kMaxSamplesPerFrame = 40;
 // this -- V5 has no dynamic allocation to grow it).
 constexpr std::size_t kMaxChannels = 64;
 
-// v1.1 opt-in CHANNEL_DEF extensions (protocol.md §5.3). Defaults reproduce
+// Opt-in CHANNEL_DEF extensions (protocol.md §5.3). Defaults reproduce
 // a plain v1 CHANNEL_DEF (no v11_flags byte emitted at all) so existing
 // callers are byte-for-byte unaffected.
 struct ChannelOptions {
@@ -56,7 +57,19 @@ struct ChannelOptions {
   // unless enum labels are present).
   int device_port = -1;
 
+  // v1.4 (protocol.md §5.3/§6.7): the mechanism/group this channel belongs
+  // to, e.g. "drive/pid". Shares one namespace with CONFIG_SCHEMA's `path`
+  // (§5.6) -- the same string means the same group, so the dashboard shows
+  // this channel's graph next to that group's tunable parameters. nullptr
+  // or "" = not declared: no path field is emitted at all and the dashboard
+  // falls back to its name-based grouping heuristic (exactly the pre-v1.4
+  // behavior). Max kMaxPathLen bytes.
+  // 中文：這條頻道屬於哪個機構／群組（如 "drive/pid"），與可調參數的 path 同一
+  // 個命名空間。不填＝不宣告，wire 上一個 byte 都不多、前端退回名字啟發式。
+  const char* path = nullptr;
+
   bool has_device_port() const { return device_port >= 0; }
+  bool has_path() const { return path != nullptr && path[0] != '\0'; }
 };
 
 class Telemetry {
@@ -70,21 +83,27 @@ class Telemetry {
   // long) -- check via is_valid_channel().
   ChannelId declare_channel(const char* name, ValueType value_type, const char* unit = "");
 
-  // v1.1 CHANNEL_DEF with optional device_port attribution. If
-  // opt.has_device_port() is false, emits a plain v1-shaped CHANNEL_DEF
-  // (no v11_flags), identical to declare_channel(); otherwise emits the
-  // v11_flags byte + device_port. value_type may be any ValueType incl.
+  // CHANNEL_DEF with optional device_port (v1.1) / path (v1.4) attribution.
+  // If neither opt.has_device_port() nor opt.has_path() is set, emits a
+  // plain v1-shaped CHANNEL_DEF (no v11_flags), identical to
+  // declare_channel(); otherwise emits the v11_flags byte followed by the
+  // set fields in bit order. value_type may be any ValueType incl.
   // kString/kEnum (for kEnum without labels, front-end shows raw indices).
+  // Fails (kInvalidChannelId) if opt.path is longer than kMaxPathLen.
   ChannelId declare_channel_ex(const char* name, ValueType value_type, const char* unit = "",
                                const ChannelOptions& opt = ChannelOptions{});
 
   // v1.1 ENUM channel: registers a kEnum channel carrying enum_labels
   // (protocol.md §5.3). label index (declaration order) maps to the
   // displayed string. `device_port` < 0 omits the device_port field.
-  // Fails (kInvalidChannelId) if label_count > kMaxEnumLabels or any label
-  // > kMaxEnumLabelLen bytes.
+  // `path` (v1.4) is the mechanism/group path, nullptr/"" = not declared
+  // (see ChannelOptions::path); it is the LAST parameter so every existing
+  // call site keeps compiling unchanged.
+  // Fails (kInvalidChannelId) if label_count > kMaxEnumLabels, any label
+  // > kMaxEnumLabelLen bytes, or path > kMaxPathLen bytes.
   ChannelId declare_enum_channel(const char* name, const char* const* labels, std::size_t label_count,
-                                 int device_port = -1, const char* unit = "");
+                                 int device_port = -1, const char* unit = "",
+                                 const char* path = nullptr);
 
   static bool is_valid_channel(ChannelId id) { return id != kInvalidChannelId; }
 
@@ -142,9 +161,11 @@ class Telemetry {
 
   // Builds & sends a CHANNEL_DEF frame. `labels`==nullptr / label_count==0
   // means "no enum_labels field". device_port < 0 means "no device_port
-  // field / no v11_flags at all unless labels present".
+  // field". `path`==nullptr/"" means "no path field" (v1.4). No v11_flags
+  // byte at all when none of the three is present.
   bool send_channel_def(ChannelId id, const char* name, ValueType value_type, const char* unit,
-                        int device_port, const char* const* labels, std::size_t label_count);
+                        int device_port, const char* const* labels, std::size_t label_count,
+                        const char* path);
 
   ITransport& transport_;
 

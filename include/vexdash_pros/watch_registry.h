@@ -60,16 +60,25 @@ class WatchRegistry {
   // 重新對齊）。表滿（kMaxWatches=64）時登記靜默失敗（回 false），門面的
   // watch()/watch_config() 不回傳值，超額項會被靜默忽略——上限與行為見
   // docs/quick-start.zh-TW.md 的「常見雷」。
-  bool add(const char* name, double* ptr, const char* unit = "", int device_port = -1);
-  bool add(const char* name, float* ptr, const char* unit = "", int device_port = -1);
-  bool add(const char* name, std::int32_t* ptr, const char* unit = "", int device_port = -1);
-  bool add(const char* name, bool* ptr, const char* unit = "", int device_port = -1);
+  //
+  // `path`（protocol.md §5.3 v1.4）＝這條頻道屬於哪個機構／群組（如 "drive/pid"），
+  // 與 add_config 的 `group` 同一個命名空間：同一個字串 = dashboard 上同一個焦點分組，
+  // 該機構的圖表與可調參數會並排在一起。預設 ""＝不宣告，wire 上一個 byte 都不多、
+  // dashboard 退回名字啟發式猜分組（＝加這個參數之前的行為，既有呼叫端零改動）。
+  bool add(const char* name, double* ptr, const char* unit = "", int device_port = -1,
+           const char* path = "");
+  bool add(const char* name, float* ptr, const char* unit = "", int device_port = -1,
+           const char* path = "");
+  bool add(const char* name, std::int32_t* ptr, const char* unit = "", int device_port = -1,
+           const char* path = "");
+  bool add(const char* name, bool* ptr, const char* unit = "", int device_port = -1,
+           const char* path = "");
 
   // ---- 登記：telemetry（取樣函式式，供 watch_motor 等物件助手用）----------
   // sampler(obj) 每次回傳一個 double 樣本（wire 型別固定 kF64）。obj 是傳給
-  // sampler 的 context（例如 pros::Motor*）。
+  // sampler 的 context（例如 pros::Motor*）。`path` 意義同上。
   bool add_fn(const char* name, double (*sampler)(void* obj), void* obj, const char* unit = "",
-              int device_port = -1);
+              int device_port = -1, const char* path = "");
 
   // ---- 登記：config（可調雙向，指標式）-----------------------------------
   // group 是 dashboard 上的 UI 群組路徑（protocol.md §5.6），"" = 根。
@@ -97,6 +106,11 @@ class WatchRegistry {
     char name[kMaxNameLen + 1] = {0};
     // config: UI 群組路徑；telemetry: 單位字串。兩者互斥（依 kind），共用一個緩衝。
     char group_or_unit[kMaxNameLen + 1] = {0};
+    // telemetry 專用：CHANNEL_DEF 的 path（protocol.md §5.3 v1.4），""＝不宣告。
+    // config 項目不用這格（它的群組本來就在 group_or_unit）——不共用緩衝是因為
+    // telemetry 需要「單位」與「群組」兩個都存得下。固定長度、無動態配置；成本
+    // ＝kMaxWatches(64) × 64 bytes ≒ 4KB 靜態儲存，與 name 那格同級。
+    char path[kMaxPathLen + 1] = {0};
     Kind kind = Kind::kTelemetry;
     WatchScalar scalar = WatchScalar::kF64;
     bool is_fn = false;                        // telemetry, sampler-function form. 中文：telemetry 取樣函式式

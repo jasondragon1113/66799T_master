@@ -49,14 +49,16 @@ struct PongInfo {
   std::uint64_t responder_time_ms = 0;
 };
 
-// protocol.md §6.1: v1.3 corresponds to (major=1, minor=3). Announcing the
+// protocol.md §6.1: v1.4 corresponds to (major=1, minor=4). Announcing the
 // minor in HELLO lets the peer's UI decide whether to enable newer panels (e.g.
-// the v1.3 DEVICE_STATUS live-value panel); it is NOT a precondition for
-// decoding v1.1 CHANNEL_DEF fields, the v1.2 TELEMETRY sequence number, or v1.3
-// DEVICE_STATUS (§6.4/§6.5/§6.6: all detected structurally / by msg_type, not
-// gated on the version, so an old peer that never sent HELLO still interoperates).
+// the v1.3 DEVICE_STATUS live-value panel) or word a hint honestly (e.g. "this
+// firmware is pre-v1.4, mechanism grouping is a guess"); it is NOT a
+// precondition for decoding v1.1 CHANNEL_DEF fields, the v1.2 TELEMETRY sequence
+// number, v1.3 DEVICE_STATUS, or the v1.4 CHANNEL_DEF path
+// (§6.4/§6.5/§6.6/§6.7: all detected structurally / by msg_type / by flag bit,
+// not gated on the version, so an old peer that never sent HELLO still interoperates).
 constexpr std::uint8_t kProtocolVersionMajor = 1;
-constexpr std::uint8_t kProtocolVersionMinor = 3;
+constexpr std::uint8_t kProtocolVersionMinor = 4;
 
 class Session {
  public:

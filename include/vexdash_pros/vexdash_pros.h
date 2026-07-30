@@ -36,6 +36,7 @@
 
 #include "vexdash/protocol_types.h"  // DeviceType for declare_device()
 #include "vexdash/session.h"
+#include "vexdash_pros/command_registry.h"  // CommandHandler, for declare_command()
 #include "vexdash_pros/connection_pump.h"
 
 // 前向宣告，讓 watch_motor() 能在標頭吃 pros::Motor& 而不強迫 host 端 include PROS
@@ -99,13 +100,25 @@ inline Session& quick_start() { return init_usb(); }
 // 透傳出來，不是新行為，只是不再丟棄它。詳見 docs/quick-start.zh-TW.md 的「常見雷」。
 
 // 唯讀上報：登記一個變數，背景自動取樣並畫成圖表線。`unit` 是選填單位字串（如
-// "deg"、"rpm"）；`device_port` 選填（1-21 智慧埠），預設不歸屬任何埠。
+// "deg"、"rpm"）；`device_port` 選填（1-21 智慧埠），預設不歸屬任何埠；`path` 選填
+// 機構／群組路徑（如 "drive/pid"），**與 watch_config 的 `group` 是同一個命名空間**
+// ——填同一個字串，dashboard 的「調校焦點」就會把這條圖表線跟那個機構的可調參數放
+// 在同一組。不填＝維持原樣（wire 上一個 byte 都不多，前端退回用名字猜分組；名字猜
+// 分組會被孔位名撞到，這正是填 path 要解決的問題）。
+//
+//   watch_config("kP", &kP, "drive/pid");            // 參數屬於底盤 PID
+//   watch("error", &error, "rpm", -1, "drive/pid");  // 這條圖表線也是（明講，不用猜）
+//
 // 回傳 true＝已登記／已覆蓋既有同名項；false＝表滿（64 項已滿）、名字無效（空字串
 // 或超過 63 bytes）、或 value 為 nullptr。
-bool watch(const char* name, double* value, const char* unit = "", int device_port = -1);
-bool watch(const char* name, float* value, const char* unit = "", int device_port = -1);
-bool watch(const char* name, std::int32_t* value, const char* unit = "", int device_port = -1);
-bool watch(const char* name, bool* value, const char* unit = "", int device_port = -1);
+bool watch(const char* name, double* value, const char* unit = "", int device_port = -1,
+           const char* path = "");
+bool watch(const char* name, float* value, const char* unit = "", int device_port = -1,
+           const char* path = "");
+bool watch(const char* name, std::int32_t* value, const char* unit = "", int device_port = -1,
+           const char* path = "");
+bool watch(const char* name, bool* value, const char* unit = "", int device_port = -1,
+           const char* path = "");
 
 // 可調雙向：登記一個變數當 dashboard 可調參數；使用者在網頁改值，背景自動回寫進
 // 這個變數。`group` 選填 UI 群組路徑（如 "drive/pid"），預設放根層。
@@ -116,12 +129,45 @@ bool watch_config(const char* name, std::int32_t* value, const char* group = "")
 bool watch_config(const char* name, bool* value, const char* group = "");
 
 // 物件助手：一次登記一顆馬達的常用遙測（位置 deg / 轉速 rpm / 溫度 °C / 電流 mA），
-// 頻道名為 "<name>.pos" 等，並自動帶上馬達的 device_port。`motor` 必須在程式執行期
+// 頻道名為 "<name>.pos" 等，並自動帶上馬達的 device_port。`path` 選填（意義同 watch()），
+// 四條頻道會一起掛進該機構分組——底盤四顆馬達全填 "drive" 就一次分好組。
+// `motor` 必須在程式執行期
 // 全程存活（全域 / static）。[NEEDS-HW-VERIFICATION]：需 pros::Motor，僅能實機驗。
 // 回傳 true＝四條 channel 全部登記成功；false＝至少一條失敗（通常是表滿——4 項一起
 // 登記，若剩餘槽位不足 4 個，先登記的仍會成功、只有超出容量的那幾條失敗，回傳值
 // 只告知「整體是否全數成功」，個別哪一條失敗需檢查 dashboard 頻道清單）。
-bool watch_motor(const char* name, pros::Motor& motor);
+bool watch_motor(const char* name, pros::Motor& motor, const char* path = "");
+
+// ---- 自訂按鈕（CMD_DEF/COMMAND，盤點-dashboard功能稽核-2026-07-27.md 前提 2/C6）---
+//
+// 跟 watch()/watch_config() 同一套心智模型：「給名字、給一個處理函式」。這是盤點報告
+// 點名的缺口——watch 系列都有一行式門面，declare_command 原本沒有，dashboard 的
+// 「自訂按鈕 Commands」面板因此在教學現場幾乎不會亮。用法（在 quick_start() 之前登記，
+// 跟 watch()/watch_config() 同順序要求）：
+//
+//   void on_reset() { odom_x = 0; odom_y = 0; }
+//   declare_command("Reset Odometry", &on_reset, /*requires_confirm=*/true);
+//   quick_start();
+//
+// 背景會自動送出 CMD_DEF、按鈕觸發時自動呼叫你的函式、重連時自動重新宣告（同一顆
+// 按鈕、同一個 id，見 command_registry.h 的 idempotent 說明）。回傳 true＝已登記／
+// 已覆蓋既有同名項；false＝表滿（16 項）、名字無效、或 handler 為 nullptr。
+//
+// 本一行式門面只涵蓋「零參數觸發鈕」（教學現場最常見的形狀）；需要帶參數的指令
+// （例如「移動到 (x,y)」）仍走底層 API：session().command().declare(name,
+// CmdParamSpec[], count, requires_confirm) + set_callback()，兩者可並存。
+bool declare_command(const char* name, CommandHandler handler, bool requires_confirm = false,
+                     void* user_data = nullptr);
+
+// ---- 場地 Field（FIELD_OPS SET_POSE，盤點-dashboard功能稽核-2026-07-27.md 前提 1）---
+//
+// 一行式：在 opcontrol()/里程計更新迴圈裡跟 watch() 上報一樣頻繁呼叫即可，dashboard
+// 的「場地 Field」面板會即時畫出機器人位置＋朝向＋走過的軌跡殘影。這是盤點報告點名
+// 的缺口——協定/lib-core 的 FieldView::set_pose() 早就有，但門面沒包裝、範例沒示範，
+// 所以車端不主動呼叫就是一格永遠空白的格線。等同 `session().field().set_pose(...)`
+// 的薄轉發（省一次 `session().field()` 中繼查找）。回傳值同 FieldView::set_pose()
+// （false＝底層 transport 寫入失敗，不是常見情況，可忽略回傳值）。
+bool set_pose(double x_mm, double y_mm, double heading_rad);
 
 // ---- 裝置宣告 + 自動掃描（DEVICE_MAP，票 WS9）---------------------------
 //

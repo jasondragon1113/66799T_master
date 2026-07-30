@@ -17,8 +17,8 @@
 // passed in as plain floats -- this class has NO PROS dependency):
 //   DeviceStatus ds(transport);
 //   ds.begin();
-//   float m[3] = {41.5f, 3.2f, 850.0f};        // temp C, power W, current mA
-//   ds.add_entry(3, DeviceType::kMotor, m, 3);  // observed type = MOTOR
+//   float m[4] = {41.5f, 3.2f, 850.0f, 127.0f};  // temp C, power W, current mA, rpm (WS10-F)
+//   ds.add_entry(3, DeviceType::kMotor, m, 4);    // observed type = MOTOR
 //   ds.send();   // encodes+sends, splitting across frames if ever needed
 //
 // The value order per observed_type is the §5.13 contract; the caller (a PROS

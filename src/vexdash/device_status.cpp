@@ -78,7 +78,8 @@ bool DeviceStatus::send() {
     }
     if (batch_end == idx) {
       // A single entry too big to fit even alone -- impossible with today's
-      // value sets (max entry 15 bytes), but guard against an infinite loop.
+      // value sets (max entry 19 bytes: BATTERY or MOTOR [WS10-F], both
+      // value_count=4), but guard against an infinite loop.
       return false;
     }
     if (!send_entries(idx, batch_end)) return false;

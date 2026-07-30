@@ -62,7 +62,8 @@ WatchRegistry::Entry* WatchRegistry::acquire(const char* name, Kind kind) {
 
 // ---- telemetry 指標式 ------------------------------------------------------
 
-bool WatchRegistry::add(const char* name, double* ptr, const char* unit, int device_port) {
+bool WatchRegistry::add(const char* name, double* ptr, const char* unit, int device_port,
+                        const char* path) {
   if (ptr == nullptr) return false;  // a null pointer is rejected right at the entry point (see header) 中文：null 指標入口即拒絕（見 header）
   Entry* e = acquire(name, Kind::kTelemetry);
   if (e == nullptr) return false;
@@ -72,10 +73,12 @@ bool WatchRegistry::add(const char* name, double* ptr, const char* unit, int dev
   e->sampler = nullptr;
   e->device_port = device_port;
   copy_str(e->group_or_unit, unit, sizeof(e->group_or_unit));
+  copy_str(e->path, path, sizeof(e->path));
   return true;
 }
 
-bool WatchRegistry::add(const char* name, float* ptr, const char* unit, int device_port) {
+bool WatchRegistry::add(const char* name, float* ptr, const char* unit, int device_port,
+                        const char* path) {
   if (ptr == nullptr) return false;  // a null pointer is rejected right at the entry point (see header) 中文：null 指標入口即拒絕（見 header）
   Entry* e = acquire(name, Kind::kTelemetry);
   if (e == nullptr) return false;
@@ -85,10 +88,12 @@ bool WatchRegistry::add(const char* name, float* ptr, const char* unit, int devi
   e->sampler = nullptr;
   e->device_port = device_port;
   copy_str(e->group_or_unit, unit, sizeof(e->group_or_unit));
+  copy_str(e->path, path, sizeof(e->path));
   return true;
 }
 
-bool WatchRegistry::add(const char* name, std::int32_t* ptr, const char* unit, int device_port) {
+bool WatchRegistry::add(const char* name, std::int32_t* ptr, const char* unit, int device_port,
+                        const char* path) {
   if (ptr == nullptr) return false;  // a null pointer is rejected right at the entry point (see header) 中文：null 指標入口即拒絕（見 header）
   Entry* e = acquire(name, Kind::kTelemetry);
   if (e == nullptr) return false;
@@ -98,10 +103,12 @@ bool WatchRegistry::add(const char* name, std::int32_t* ptr, const char* unit, i
   e->sampler = nullptr;
   e->device_port = device_port;
   copy_str(e->group_or_unit, unit, sizeof(e->group_or_unit));
+  copy_str(e->path, path, sizeof(e->path));
   return true;
 }
 
-bool WatchRegistry::add(const char* name, bool* ptr, const char* unit, int device_port) {
+bool WatchRegistry::add(const char* name, bool* ptr, const char* unit, int device_port,
+                        const char* path) {
   if (ptr == nullptr) return false;  // a null pointer is rejected right at the entry point (see header) 中文：null 指標入口即拒絕（見 header）
   Entry* e = acquire(name, Kind::kTelemetry);
   if (e == nullptr) return false;
@@ -111,13 +118,14 @@ bool WatchRegistry::add(const char* name, bool* ptr, const char* unit, int devic
   e->sampler = nullptr;
   e->device_port = device_port;
   copy_str(e->group_or_unit, unit, sizeof(e->group_or_unit));
+  copy_str(e->path, path, sizeof(e->path));
   return true;
 }
 
 // ---- telemetry 取樣函式式 --------------------------------------------------
 
 bool WatchRegistry::add_fn(const char* name, double (*sampler)(void*), void* obj, const char* unit,
-                           int device_port) {
+                           int device_port, const char* path) {
   if (sampler == nullptr) return false;  // the sampler must not be null (obj may be a null context) 中文：取樣器不可為 null（obj 可以是 null context）
   Entry* e = acquire(name, Kind::kTelemetry);
   if (e == nullptr) return false;
@@ -127,6 +135,7 @@ bool WatchRegistry::add_fn(const char* name, double (*sampler)(void*), void* obj
   e->sampler = sampler;
   e->device_port = device_port;
   copy_str(e->group_or_unit, unit, sizeof(e->group_or_unit));
+  copy_str(e->path, path, sizeof(e->path));
   return true;
 }
 
@@ -243,6 +252,9 @@ void WatchRegistry::declare_all(Session& session) {
     } else {  // kTelemetry
       ChannelOptions opt;
       opt.device_port = e.device_port;
+      // v1.4：把登記時給的機構路徑帶上 CHANNEL_DEF。空字串走 has_path()==false，
+      // 不會送出 path 欄位（wire 與加這個欄位之前逐 byte 相同）。
+      opt.path = e.path;
       // is_fn 一律 f64（取樣函式回傳 double）；指標式依 scalar 推導 wire 型別。
       ValueType vt = e.is_fn ? ValueType::kF64 : wire_type(e.scalar);
       e.ch_id = session.telemetry().declare_channel_ex(e.name, vt, e.group_or_unit, opt);

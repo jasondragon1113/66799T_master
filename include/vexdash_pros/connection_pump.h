@@ -91,7 +91,15 @@ struct PumpConfig {
   // mid-burst by a lossy bridge (e.g. ESP32 WiFi): without this, a dropped
   // def is lost for the rest of the session and the dashboard falls back to
   // a generic name (channel_N) for that item. Set to 0 to disable.
-  std::uint32_t registration_resend_period_ms = 2000;
+  // Was 2000ms; raised to 5000ms (2026-07-26, ticket V-15) -- the resend burst
+  // is ~843B sent all at once and was the single biggest periodic spike on the
+  // RS-485/WiFi link every 2s. 5s is still short enough to self-heal a dropped
+  // CHANNEL_DEF well within a normal debugging/pairing session, so the
+  // self-heal guarantee holds while cutting the burst frequency by 2.5x.
+  // 中文：原本 2000ms，V-15 精算後改 5000ms——重送整批約 843B 是線路上唯一的
+  // 週期性壓力尖峰，每 2 秒炸一次；拉到 5 秒仍能在合理時間內自癒掉幀的
+  // CHANNEL_DEF（沿用 tick() 第 6 點的自癒機制），但把突發頻率降到 2.5 分之一。
+  std::uint32_t registration_resend_period_ms = 5000;
 
   // 方案 A（watch 自動上報）鉤子。非 nullptr 時，pump 在每次 telemetry flush 前
   // 先呼叫它一次，讓 watch 登記表把所有登記變數取樣進 telemetry()。預設 nullptr
