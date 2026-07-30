@@ -196,3 +196,197 @@ g++ -std=c++20 -D_USE_MATH_DEFINES -fsyntax-only -w \
 （ARM newlib）上是正常的。
 
 真正的 `pros make` 與上車調參留給你們做。
+
+---
+
+## 六、調參模式：一支獨立的「調參版遙控程式」
+
+### 6.1 它不是一個模式，是另一支程式
+
+教練要「按按鍵觸發固定動作、配 dashboard 滑桿調 PID」。做法**不是**在正常駕駛程式裡加一個
+模式開關，而是**編譯期變體**：同一份原始碼，多加一個 `-DPID_TUNE_PROGRAM` 就編出第二支程式。
+
+- 有定義 `PID_TUNE_PROGRAM` → `opcontrol()` 改叫 `tune_opcontrol()`（`src/tune_opcontrol.cpp`）。
+- **沒定義（＝比賽要燒的那一版）** → `src/tune_opcontrol.cpp` 整個檔案編出來是**空的**，
+  `opcontrol()` 裡正常駕駛那一段一個字都沒改。
+
+這樣做的理由：**沒有模式旗標，就不可能卡在錯的模式**。不用擔心組合鍵撞到現有功能、
+不用擔心比賽中誤觸、也不用寫「切進去要停用哪些駕駛鍵、切出來要恢復哪些」那一整套邏輯——
+兩支程式從來不會同時存在於同一顆二進位檔裡。
+
+### 6.2 怎麼編、怎麼燒
+
+| | 正常比賽版 | 調參版 |
+|---|---|---|
+| 編譯 | `pros mu --slot 1`（照舊，什麼都不用加） | `pros make tune` |
+| 上傳 | 同上 | `pros upload --slot 2 --name "66799T TUNE"` |
+| slot | **1** | **2** |
+| 比賽時 | **只用 slot 1** | 絕對不要選它 |
+
+`pros make tune` 是 Makefile 新增的 target，內容等同這兩行：
+
+```
+pros make clean
+pros make EXTRA_CXXFLAGS=-DPID_TUNE_PROGRAM
+```
+
+**`clean` 不能省。** 這次唯一的差別只有一個 `-D` 旗標，make 從檔案時間戳看不出任何檔案「變舊」，
+不清乾淨會拿到一半調參版、一半正常版的物件檔。
+
+（`EXTRA_CXXFLAGS` 是 PROS 的 Makefile 本來就留的鉤子，在 `common.mk` 的 C++ 編譯規則裡；
+命令列給的變數會蓋掉 Makefile 裡的空值。這條有實際用 GNU Make 4.4.1 跑 `-n` 驗過，
+旗標確實會出現在每一行 `.cpp` 的編譯指令上——見第 6.7 節。）
+
+### 6.3 按鍵表（**只有調參版才有這些鍵**）
+
+| 鍵 | 動作 | 實際呼叫 |
+|---|---|---|
+| **L1** | 前進 50 cm | `chassis.drive_distance(cm_to_inch(50))`＝ **19.685 吋**（JAR 的 `drive_distance` 吃的是**吋**） |
+| **L2** | 後退 50 cm | `chassis.drive_distance(-cm_to_inch(50))` |
+| **R1** | 左轉 90° | `chassis.turn_to_angle(現在朝向 − 90)` |
+| **R2** | 右轉 180° | `chassis.turn_to_angle(現在朝向 + 179.5)` ← 見下面說明 |
+| **A** | 滑軌升到高目標 | `cascade_set_target(CASCADE_PRESET_2_DEG)` ＝ **595**（現有最高 preset） |
+| **B** | 滑軌降到低目標 | `cascade_set_target(CASCADE_LEFT_FINAL_DEG)` ＝ **0**（完全收回，限位開關那一格） |
+| **UP** | 手臂抬高 | `arm_set_position(ArmPosition::POS_2)` ＝ **160°** ← 見下面說明 |
+| **DOWN** | 手臂放低 | `arm_set_position(ArmPosition::DOWN)` ＝ **0°** ← 見下面說明 |
+| 左搖桿 Y／右搖桿 X | 一般方向盤式駕駛，用來把車開回起點 | 只有「沒有測試動作在跑」時才有效 |
+| X／Y／LEFT／RIGHT | **沒有任何動作**，只當中止鍵 | — |
+
+**為什麼 180° 是下 179.5°**：`reduce_negative_180_to_180()`（util.cpp）把正好 `+180` 折成 `-180`，
+所以真的填 180 的話第一圈誤差是負的、車子會往**左**轉。少半度就能讓誤差保持正值＝確定往右轉，
+而 0.5° 對階躍響應的觀察完全沒有影響。
+
+**為什麼手臂是 160°／0°，不是教練說的 120°／10°**：手臂照規格走既有的 `arm_set_position`／POS 慣例，
+而現有 preset 只有四個值——`DOWN=0`、`POS_2=160`、`POS_3=265`、`POS_1=283`（`src/Template/arm.cpp`）。
+120 與 10 都不在裡面，所以取**最接近的現值**：120°→`POS_2`(160)、10°→`DOWN`(0)，並在此註明。
+**要正好 120／10 不用改程式**：這四個數字本身就是 dashboard `arm/presets` 群組的滑桿，
+在 dashboard 上把 `POS_2` 拉到 120、`DOWN` 拉到 10，這兩顆鍵就會跑到 120／10。
+
+### 6.4 中止：按了收得回來
+
+**測試動作進行中，按下任何一顆按鍵（同一顆也算）就中止**，遙控器立刻震一下：
+
+- **底盤**：把 `drive_max_voltage` / `heading_max_voltage` / `turn_max_voltage` 一起夾成 0。
+  `drive_distance()` 與 `turn_to_angle()` 每一圈都會重讀這三個上限，而且這兩個呼叫都**沒有**用
+  motion chaining（那才會強制一個「最低電壓」），所以**下一個 10 ms 迴圈輪子就是 0 V**。
+  之後那支動作在 0 V 的狀態下自己跑到逾時結束（JAR 的逾時：直走 3 秒、轉彎 2 秒），
+  確定結束了才把電壓上限放回去。
+- **滑軌**：`cascade_set_target(現在的位置)`，PID 就地撐住，不會留一個到不了的目標讓馬達死推
+  （跟 Z1 那個 `preset_abort()` 同一套理由）。
+- **手臂**：`arm_hold_here()`，鎖在當下的角度。
+- **搖桿大幅推動**（超過 25／127）也算中止——駕駛想把車搶回來的時候不用先找按鍵。
+
+**為什麼不是直接砍掉那支 task**：`drive_distance()` 裡面有一行 `printf()`，在 printf 中途砍掉
+task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vexdash）就跟著壞掉。
+所以改成「把電壓夾成 0，讓它自己安靜地跑完」——停車一樣快，但不會弄壞別的東西。
+
+### 6.5 比賽狀態下強制關閉
+
+- 主迴圈每一圈都看 `pros::competition::is_disabled() || is_autonomous()`，成立就**不收任何按鍵**、
+  螢幕顯示 `COMP LOCK`。
+- 另外有一支**永遠在跑的看門狗 task**：場控在 disable／進入自走的瞬間會砍掉 `opcontrol`，
+  但**不會**砍掉跑底盤動作的那支 worker task——它會若無其事繼續開車。看門狗每 20 ms 檢查一次，
+  一離開遙控期就立刻把動作掐掉。
+- 看門狗刻意**不碰手臂與滑軌**：自走期間那兩個是自走程式在管，而 `disabled()` 本來就已經
+  把滑軌控制器停掉了（第一節做的）。它只負責一件事：**調參動作不准活過遙控期**。
+
+### 6.6 調參流程建議
+
+1. 車放在**空曠的地方**（前後至少留 1.5 公尺、左右留得下轉 180°），第一次有人守著電源。
+2. 燒調參版到 slot 2，開機選 slot 2。**遙控器螢幕第一行會一直掛著 `== PID TUNE ==`、
+   開場震兩下**——看到這個才是調參版。
+3. dashboard 連上（`ws://192.168.4.1`），打開 Graph 面板。
+4. **拉滑桿 → 按鍵實跑 → 看曲線**，一次只動一個增益：
+   - 底盤直走：拉 `drive_kP` / `drive_kI` / `drive_kD` → 按 **L1**（前進 50 cm）→
+     看 `drive_error` / `drive_target` / `drive_output` 三條線。回不去就按 **L2** 開回來，
+     或直接用搖桿把車推回起點。
+   - 轉彎：拉 `turn_kP` / `turn_kI` / `turn_kD` → 按 **R1**（左 90°）或 **R2**（右 180°）→
+     看 `turn_error` / `turn_target` / `turn_output`。
+   - 滑軌：拉 `cascade_kG` → `cascade_kP` → `cascade_kD` → 按 **A**／**B** →
+     看 `cascade_pos` / `cascade_target` / `cascade_error` / `cascade_output` / `cascade_ff`。
+     （順序照第三節第 4 點：先 kG，再 kP，再 kD，kI 最後。）
+   - 手臂：拉 `arm_kG` → `arm_kP` → `arm_kD` → 按 **UP**／**DOWN** →
+     看 `arm_angle` / `arm_target` / `arm_error` / `arm_output` / `arm_ff`。
+5. **時序很重要：先拉滑桿，再按鍵。** 底盤那兩個函式是在被呼叫的那一瞬間才把
+   `chassis.drive_kp/ki/kd`（`turn_*` 同理）複製進 PID 物件的，所以**每按一次鍵＝重新讀一次
+   滑桿現值**；動作跑到一半才拉滑桿不會影響那一次動作（要看階躍響應，這反而是對的行為）。
+   手臂與滑軌是每圈重抄（第二、三節已修），拉了立刻生效。
+6. 調完的數字**一定要抄回程式碼再重燒正常版**——dashboard 上調的值斷電就沒了。
+   - 底盤／轉彎：`src/robot-config.cpp` 的 `default_constants()`
+   - 手臂：`src/Template/arm.cpp` 上方
+   - 滑軌：`src/Template/cascade.cpp` 上方
+7. **抄完記得重燒 slot 1**，並確認比賽當天選的是 slot 1。
+
+### 6.7 這一段動了哪些檔案
+
+| 檔案 | 改了什麼 | 對正常（比賽）版的影響 |
+|---|---|---|
+| `src/tune_opcontrol.cpp`（新） | 整支調參程式 | **無**——整個檔案包在 `#ifdef PID_TUNE_PROGRAM` 裡，正常版編出來是空的 |
+| `include/tune_opcontrol.h`（新） | 一行函式宣告＋說明 | 無（只是宣告） |
+| `src/main.cpp` | `opcontrol()` 包成 `#ifdef` / `#else`；`#else` 那段是原本的內容，一個字沒改 | **零行為差** |
+| `include/Template/arm.h`、`src/Template/arm.cpp` | 加了 `arm_hold_here()`（中止鍵用），**整段包在 `#ifdef PID_TUNE_PROGRAM` 裡** | **零行為差**（正常版根本沒編到這幾行） |
+| `Makefile` | 新增 `tune` target | 無（`.DEFAULT_GOAL` 仍是 `quick`，已驗證 `make` 不帶旗標） |
+
+**沒有動到**：`Drive::control_arcade()`（正常駕駛面一個字沒改）、`cascade.cpp`／`cascade.h`、
+共用的 `PID` class、`drive.cpp` 的任何一行、`include/vexdash*`／`src/vexdash*` 整包。
+
+### 6.8 駕駛面前後對照（正常版 vs 調參版）
+
+| 鍵 | 正常版（slot 1，第二節那張表） | 調參版（slot 2） |
+|---|---|---|
+| L1 / L2 | 滑軌點動上／下 | 前進／後退 50 cm |
+| R1 / R2 | intake 正／反轉 | 左轉 90°／右轉 180° |
+| A | （未使用，只翻一個沒接東西的旗標） | 滑軌升到 595 |
+| B | 爪子 toggle | 滑軌降到 0 |
+| X | toggle 氣缸 | 無動作（中止鍵） |
+| Y | （未使用） | 無動作（中止鍵） |
+| UP | （已註解掉，無動作） | 手臂到 POS_2 (160°) |
+| DOWN | 取消序列＋手臂回 DOWN | 手臂回 DOWN (0°) |
+| LEFT | LEFT 預設序列 | 無動作（中止鍵） |
+| RIGHT | RIGHT 預設序列 | 無動作（中止鍵） |
+| 搖桿 | 方向盤式駕駛＋黏著煞車模式 | 方向盤式駕駛（沒有黏著煞車邏輯；測試動作跑的時候失效） |
+| 限位開關歸零 | 有 | **沒有**（調參版沒有跑 `control_arcade()` 那段自癒；A／B 測試前記得先把滑軌降到底一次，開場的 tare 就是在那個位置歸零的） |
+
+**正常版那一欄跟第二節那張表完全一致——這個 PR 的第六節沒有動它任何一格。**
+
+### 6.9 這一節的風險與取捨
+
+- **一樣沒有上車驗過**，也沒有真的跑過 `pros make`（沒有 ARM toolchain）。做的是主機端語法門
+  ＋ Makefile 的 `-n` 乾跑，見下。
+- **調參版沒有限位開關自癒**（見上表）。刻意的：那段邏輯長在 `control_arcade()` 裡面，
+  要拿來用就得動正常駕駛面。代價是滑軌編碼器在長時間調參後可能會漂——重開一次程式就好。
+- **中止底盤動作之後，最多要等 3 秒**那支動作才真的結束（輪子在第一個 10 ms 就已經 0 V 了，
+  等的只是迴圈自己逾時）。這 3 秒內不收新的測試指令。這是為了不砍 task（見 6.4）付的代價。
+- **調參版沒有自走保護以外的比賽適應**。它本來就不該上場：燒 slot 2、比賽選 slot 1。
+- **手臂的 `arm_hold_here()` 是這個 PR 唯一動到 arm 控制器的地方**，而且整段包在
+  `#ifdef` 裡。如果你們覺得連 `#ifdef` 都不想要，把它拿掉、中止鍵對手臂就不做事即可
+  （手臂的動作本來就是既有 preset，跟正常駕駛按 DOWN 走的是同一條路）。
+- **`pros make tune` 沒有真的跑完過**，只用 GNU Make 4.4.1 做過 `-n` 乾跑，確認：
+  ① `tune` 會先 `clean` 再帶旗標重編；② `-DPID_TUNE_PROGRAM` 確實出現在每一行 `.cpp` 的
+  編譯指令上；③ 不帶 target 的 `make` 預設目標仍是 `quick`、指令列上沒有那個旗標。
+  真正的 ARM 編譯還是要你們跑一次。
+
+### 6.10 第六節做過的驗證
+
+同第五節的主機端語法門，**兩個方向都跑**：
+
+```
+# 正常版
+g++ -std=c++20 -D_USE_MATH_DEFINES -fsyntax-only -w -Iinclude -Iinclude/Template/pure-pursuit <每一個 src/**/*.cpp>
+# 調參版
+g++ -std=c++20 -D_USE_MATH_DEFINES -DPID_TUNE_PROGRAM -fsyntax-only -w -Iinclude -Iinclude/Template/pure-pursuit <同上>
+```
+
+| | 檔案數 | 通過 | 沒過 |
+|---|---|---|---|
+| 這個 PR 之前（第五節的基線） | 37 | 36 | `usb_serial_transport.cpp` |
+| 正常版（無旗標） | **38** | **37** | `usb_serial_transport.cpp` |
+| 調參版（`-DPID_TUNE_PROGRAM`） | **38** | **37** | `usb_serial_transport.cpp` |
+
+唯一沒過的還是那個 POSIX `fcntl` 的老問題，**改動前後完全相同、跟這次無關**（見第五節）。
+新增的 `tune_opcontrol.cpp` 另外用 `-Wall` 單獨編過，**零警告**。
+
+真正的 `pros make tune` 與上車調參留給你們做。
+
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

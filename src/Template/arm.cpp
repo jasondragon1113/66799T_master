@@ -88,7 +88,21 @@ float tele_arm_ff = 0;
 // would look like a huge error and slam the arm).
 static float arm_last_good_deg = 0;
 
+#ifdef PID_TUNE_PROGRAM
+// PID-TUNING BUILD ONLY. See arm.h. Everything between these #ifdef guards is
+// absent from the competition build, so nothing below changes the arm's
+// behaviour there -- there is nothing there to change it.
+// 中文：只有調參版才會編到。比賽版完全沒有這幾行，所以不可能影響比賽版的手臂
+// 行為——因為比賽版裡根本沒有這段。
+static bool arm_hold_active = false;
+static float arm_hold_deg = 0;
+#endif
+
 void arm_set_position(ArmPosition pos){
+#ifdef PID_TUNE_PROGRAM
+  // A real preset command always wins over a hold.
+  arm_hold_active = false;
+#endif
   arm_target = pos;
 }
 
@@ -106,6 +120,14 @@ float arm_get_position_deg(){
   arm_last_good_deg = centideg / 100.0;
   return arm_last_good_deg;
 }
+
+#ifdef PID_TUNE_PROGRAM
+// PID-TUNING BUILD ONLY. See arm.h.
+void arm_hold_here(){
+  arm_hold_deg = arm_get_position_deg();
+  arm_hold_active = true;
+}
+#endif
 
 float arm_target_degrees(ArmPosition pos){
   float arm_deg;
@@ -149,6 +171,10 @@ void arm_task(){
     armPID.starti = ARM_STARTI;
 
     float target = arm_target_degrees(arm_target);
+#ifdef PID_TUNE_PROGRAM
+    // PID-TUNING BUILD ONLY: the abort key parks the arm where it is.
+    if(arm_hold_active) target = clamp(arm_hold_deg, ARM_MIN_DEG, ARM_MAX_DEG);
+#endif
     float position = arm_get_position_deg();
     float error = target - position;
 

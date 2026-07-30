@@ -95,3 +95,18 @@ float arm_target_degrees(ArmPosition pos);
 void arm_set_position(ArmPosition pos);
 void arm_task();
 void start_arm_task();
+
+#ifdef PID_TUNE_PROGRAM
+// PID-TUNING BUILD ONLY (-DPID_TUNE_PROGRAM). Not compiled into the competition
+// build at all, so the arm controller the team already signed off on is
+// byte-for-byte unchanged there.
+//
+// Freezes the arm at whatever angle it is at right now, so the tuning program's
+// abort key can stop an arm test in place instead of letting it carry on to a
+// preset. The next arm_set_position() call cancels it.
+// 中文：只有調參版才編得到這一段，比賽版完全沒有這段程式碼，所以已經驗收過的
+// 手臂控制器在比賽版是一個位元組都沒變。
+// 功能：把手臂鎖在「現在這個角度」，讓調參程式的中止鍵能把手臂停在原地，而不是
+// 讓它繼續跑到 preset。下一次呼叫 arm_set_position() 就自動解除。
+void arm_hold_here();
+#endif

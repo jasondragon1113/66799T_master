@@ -1,5 +1,6 @@
 #include "main.h"
 #include "vexdash_pros/vexdash_pros.h" // vexdash car-side telemetry library
+#include "tune_opcontrol.h"            // PID-tuning build only -- see the header
 
 Task* intake_task = nullptr;
 
@@ -189,6 +190,17 @@ void autonomous() {
 }
 
 void opcontrol() {
+#ifdef PID_TUNE_PROGRAM
+	// PID-TUNING BUILD. Built with -DPID_TUNE_PROGRAM (`pros make tune`) and
+	// uploaded to SLOT 2; a match only ever runs slot 1. tune_opcontrol() never
+	// returns, and everything in the #else branch below is not compiled at all
+	// in this build -- the two programs never coexist in one binary, so there is
+	// no mode flag to get stuck in the wrong position.
+	// 中文：這是調參版（用 -DPID_TUNE_PROGRAM 編，燒 slot 2；比賽只跑 slot 1）。
+	// tune_opcontrol() 不會回來，而且下面 #else 那一段在這一版根本不會被編進去
+	// ——兩支程式不會同時存在於同一顆二進位檔，所以不存在「模式卡在錯的位置」。
+	tune_opcontrol();
+#else
 	default_constants();
 	bool prev_drive = false, prev_turn = false;
 	while (true) {
@@ -207,4 +219,5 @@ void opcontrol() {
 		// prev_turn  = run_turn_test;
 		delay(10);
 	}
+#endif // PID_TUNE_PROGRAM
 }
