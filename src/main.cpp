@@ -147,7 +147,9 @@ void initialize() {
 	// 不在車端程式。測完記得改回 0 重燒。
 #define VEXDASH_OVER_USB 0
 #if VEXDASH_OVER_USB
-	vexdash::init_usb();
+	// show_status=false: keep the Brain screen free (no LLEMU status HUD).
+	// 中文：第二個參數 false＝不開 Brain 螢幕的狀態畫面（pros::lcd）。
+	vexdash::init_usb(nullptr, /*show_status=*/false);
 #else
 	vexdash::init_smartport(11, 921600);
 #endif
