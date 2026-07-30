@@ -137,7 +137,20 @@ void initialize() {
 	// ESP_32_WIFI.ino — an old 115200 bridge cannot talk to this baud rate.
 	// 中文：921600 要跟 ESP32 橋韌體完全一致（官方韌體 7/25 起改 921600）。
 	// 燒了這版之後 dashboard 連不上＝ESP32 還是舊韌體，重燒最新 ESP_32_WIFI.ino 即可。
+	//
+	// DIAGNOSTIC TOGGLE: set to 1 to send telemetry over the USB cable instead
+	// of the ESP32 bridge (dashboard: switch to "Web Serial" and plug USB into
+	// the Brain). If USB streams fine but the bridge shows zero data, the fault
+	// is in the RS-485 wiring / ESP32 / smart-port path — not in this program.
+	// 中文：診斷開關——改成 1 就走 USB 線傳遙測（dashboard 切「Web Serial」、
+	// USB 插 Brain）。USB 通、橋接零資料＝問題在 RS-485 線/ESP32/智慧埠那段，
+	// 不在車端程式。測完記得改回 0 重燒。
+#define VEXDASH_OVER_USB 0
+#if VEXDASH_OVER_USB
+	vexdash::init_usb();
+#else
 	vexdash::init_smartport(11, 921600);
+#endif
 
 	// HOLD so the arm stays put under gravity when no button is pressed
 	// (arm_task() would normally set this, but it's disabled above).
