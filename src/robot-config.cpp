@@ -6,26 +6,26 @@ Rotation sideways_tracker(1);  // I just put a random number here but we dont ha
 
 // 66799T Worlds
 // negative port number means reversed (there is no separate "reversed" constructor argument)
-Motor leftFront(-3, MotorGears::blue);
-Motor leftMiddle(16, MotorGears::blue);
-Motor leftBack(6, MotorGears::green);
+Motor leftFront(-4, MotorGears::blue);
+Motor leftMiddle(6, MotorGears::blue);
+Motor leftBack(16, MotorGears::green);
 Motor rightFront(15, MotorGears::blue);
-Motor rightMiddle(-8, MotorGears::blue);
-Motor rightBack(-1, MotorGears::green);
+Motor rightMiddle(-1, MotorGears::blue);
+Motor rightBack(-8, MotorGears::green);
 
 MotorGroup leftMotors({leftFront.get_port(), leftMiddle.get_port(), leftBack.get_port()});
 MotorGroup rightMotors({rightFront.get_port(), rightMiddle.get_port(), rightBack.get_port()});
 
 Motor intake(-5, MotorGears::green);
 Motor cascade1(7, MotorGears::green);
-Motor cascade2(-2, MotorGears::green);
+Motor cascade2(-3, MotorGears::green);
 Motor arm(18, MotorGears::green);
 
-adi::DigitalOut claw('G');
-adi::DigitalOut toggle('F');
+adi::DigitalOut claw('A');
+adi::DigitalOut toggle('C');
 adi::DigitalIn cascade_limit('D');
 
-Distance distance_sensorL(4);
+Distance distance_sensorL(2);
 Distance distance_sensorR(20);
 Rotation arm_rotation(21);
 
