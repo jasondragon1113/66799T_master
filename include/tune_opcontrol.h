@@ -30,3 +30,18 @@
 
 // Never returns. Only defined when PID_TUNE_PROGRAM is set.
 void tune_opcontrol();
+
+#ifdef PID_TUNE_PROGRAM
+// Cascade four-level height targets (N1): B=LEVEL0, Y=LEVEL1, X=LEVEL2,
+// A=LEVEL3. Defined in tune_opcontrol.cpp; registered as dashboard sliders
+// ("cascade/presets" group) in main.cpp's initialize(), same convention as the
+// arm presets -- so the heights are tuned on the dashboard, not hardcoded.
+// Only exists in the tuning build, like everything else in this program.
+// 中文：調參版 B/Y/X/A 四段滑軌高度的目標值。定義在 tune_opcontrol.cpp，
+// 在 main.cpp 的 initialize() 登記成 dashboard 滑桿（cascade/presets 群組），
+// 跟手臂 preset 同一套慣例——高度在 dashboard 上調，不寫死。只存在於調參版。
+extern double CASCADE_LV0_DEG;
+extern double CASCADE_LV1_DEG;
+extern double CASCADE_LV2_DEG;
+extern double CASCADE_LV3_DEG;
+#endif

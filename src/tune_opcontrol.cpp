@@ -23,8 +23,11 @@
 //   L2    後退 50 cm         chassis.drive_distance(-50cm→吋)
 //   R1    左轉 90°           chassis.turn_to_angle(現在朝向 - 90)
 //   R2    右轉 180°          chassis.turn_to_angle(現在朝向 + 179.5)
-//   A     滑軌升到高目標     tune_cascade_goto(CASCADE_PRESET_2_DEG = 595)
-//   B     滑軌降到低目標     tune_cascade_goto(CASCADE_LEFT_FINAL_DEG = 0)
+//   B     滑軌到 LEVEL0      tune_cascade_goto(CASCADE_LV0_DEG，預設 0＝收起)
+//   Y     滑軌到 LEVEL1      tune_cascade_goto(CASCADE_LV1_DEG，預設 300)
+//   X     滑軌到 LEVEL2      tune_cascade_goto(CASCADE_LV2_DEG，預設 1000)
+//   A     滑軌到 LEVEL3      tune_cascade_goto(CASCADE_LV3_DEG，預設 2000)
+//         （四段高度都是 dashboard 滑桿 cascade/presets 群組，可線上調）
 //   UP    手臂抬到 POS_2     arm_set_position(ArmPosition::POS_2)
 //   DOWN  手臂回 DOWN        arm_set_position(ArmPosition::DOWN)
 //   左搖桿 Y／右搖桿 X       正常方向盤式駕駛（沒有測試動作在跑的時候才有效），
@@ -73,13 +76,23 @@
 
 #ifdef PID_TUNE_PROGRAM
 
-// Teleop cascade preset targets. They live in src/Template/drive.cpp with
-// external linkage and no header declaration; declared here rather than adding
-// them to a header, so nothing on the normal driving path is touched.
-// 中文：滑軌的既有 preset 目標值定義在 drive.cpp、沒有放進標頭檔。這裡直接宣告
-// extern，而不是去改標頭檔——正常駕駛那條路徑一個字都不動。
-extern int CASCADE_PRESET_2_DEG;    // 595 -- highest existing preset (LEFT sequence)
-extern int CASCADE_LEFT_FINAL_DEG;  // 0   -- lowest existing preset (fully retracted)
+// Cascade four-level height targets (N1): B=LEVEL0, Y=LEVEL1, X=LEVEL2,
+// A=LEVEL3. NOT hardcoded at the buttons -- these are dashboard sliders
+// (registered in main.cpp initialize(), "cascade/presets" group, same
+// convention as the arm presets), so the heights are tuned live. Defaults
+// follow the ScoringLevel enum that autonomous score() already uses
+// (auton-routines.h: LEVEL_0=0 .. LEVEL_3=2000) -- the same motor-degree
+// frame the teleop cascade PID runs in, with LEVEL0 = fully retracted.
+// External linkage on purpose: main.cpp registers them via tune_opcontrol.h.
+// 中文：四段高度鍵的目標值。不寫死在按鍵上——它們是 dashboard 滑桿（main.cpp
+// 的 initialize() 登記，cascade/presets 群組，跟手臂 preset 同一套慣例），
+// 高度可以線上調。預設值取自走 score() 已經在用的 ScoringLevel 列舉
+// （LEVEL_0=0～LEVEL_3=2000，跟遙控滑軌 PID 同一套馬達角度座標），
+// LEVEL0＝完全收起。
+double CASCADE_LV0_DEG = 0;     // B  -- fully retracted / bottom 收起
+double CASCADE_LV1_DEG = 300;   // Y
+double CASCADE_LV2_DEG = 1000;  // X
+double CASCADE_LV3_DEG = 2000;  // A
 
 namespace {
 
@@ -302,13 +315,15 @@ void restore_voltage_caps(){
 // cascade_set_target() clamps to exactly this range on its own
 // (src/Template/cascade.cpp:59), so this is belt and braces rather than the
 // only guard. It is here so the clamp is visible at the point where a tuning
-// button chooses a target: if someone retargets A/B by editing the presets in
-// drive.cpp, the limit is enforced right here too, not only two files away.
+// button chooses a target: the B/Y/X/A level heights are dashboard sliders,
+// so someone can drag one past the travel limit -- the clamp catches that
+// right here, not only two files away.
 // 中文：把滑軌送到某個位置，並且夾在**跟駕駛版同一個**行程上限
 // （CASCADE_EXTEND_LIMIT_DEG 來自 Template/cascade.h，就是遙控按鍵與控制器共用的
 // 那一份，不是另外抄一個數字）。cascade_set_target() 本身就已經夾同一個範圍
 // （cascade.cpp:59），所以這裡是多一層保險；放在「按鍵決定目標」的地方是為了
-// 讓夾限看得見——以後有人改 drive.cpp 裡的 preset 數字，這裡一樣擋得住。
+// 讓夾限看得見——B/Y/X/A 的四段高度是 dashboard 滑桿，有人把滑桿拉超過行程
+// 上限的話，這裡一樣擋得住。
 void tune_cascade_goto(float deg){
   cascade_set_target(clamp(deg, 0.0f, CASCADE_EXTEND_LIMIT_DEG));
 }
@@ -485,10 +500,10 @@ void tune_opcontrol(){
   // Same teleop hand-over the normal driving loop does (see control_arcade()):
   // zero the cascade encoders at the physical bottom the robot was placed at,
   // then let the cascade PID hold position 0. Without this the cascade
-  // controller stays disabled and the A/B tests would do nothing.
+  // controller stays disabled and the B/Y/X/A level keys would do nothing.
   // 中文：跟正常駕駛開場做同一件事（見 control_arcade()）：把滑軌編碼器在「機器人
   // 現在擺放的物理底部」歸零，再讓滑軌 PID 撐在 0。不做的話滑軌控制器是關著的，
-  // A／B 兩顆鍵按了不會動。
+  // B／Y／X／A 四段高度鍵按了不會動。
   chassis.drive_stop(MotorBrake::coast);
   cascade1.tare_position();
   cascade2.tare_position();
@@ -621,17 +636,29 @@ void tune_opcontrol(){
       else if(b_l2)   request_chassis_move(ChassisMove::DRIVE_BACK, "BACK 50cm");
       else if(b_r1)   request_chassis_move(ChassisMove::TURN_LEFT,  "TURN L90");
       else if(b_r2)   request_chassis_move(ChassisMove::TURN_RIGHT, "TURN R180");
-      else if(b_a){
-        tune_cascade_goto((float)CASCADE_PRESET_2_DEG);
-        active_test = ActiveTest::CASCADE;
-        test_started_ms = pros::millis();
-        screen_set(1, "CASC UP");
-      }
       else if(b_b){
-        tune_cascade_goto((float)CASCADE_LEFT_FINAL_DEG);
+        tune_cascade_goto((float)CASCADE_LV0_DEG);
         active_test = ActiveTest::CASCADE;
         test_started_ms = pros::millis();
-        screen_set(1, "CASC DOWN");
+        screen_set(1, "CASC LV0");
+      }
+      else if(b_y){
+        tune_cascade_goto((float)CASCADE_LV1_DEG);
+        active_test = ActiveTest::CASCADE;
+        test_started_ms = pros::millis();
+        screen_set(1, "CASC LV1");
+      }
+      else if(b_x){
+        tune_cascade_goto((float)CASCADE_LV2_DEG);
+        active_test = ActiveTest::CASCADE;
+        test_started_ms = pros::millis();
+        screen_set(1, "CASC LV2");
+      }
+      else if(b_a){
+        tune_cascade_goto((float)CASCADE_LV3_DEG);
+        active_test = ActiveTest::CASCADE;
+        test_started_ms = pros::millis();
+        screen_set(1, "CASC LV3");
       }
       else if(b_up){
         // 120 deg requested -> POS_2 is the closest existing preset (see the
@@ -648,9 +675,9 @@ void tune_opcontrol(){
         test_started_ms = pros::millis();
         screen_set(1, "ARM DOWN");
       }
-      // X / Y / LEFT / RIGHT are not test buttons here. They still counted as
+      // LEFT / RIGHT are not test buttons here. They still counted as
       // "any button" above, so they work as abort keys and do nothing else.
-      // 中文：X／Y／左／右在這一版不是測試鍵。它們仍然算在「任何按鍵」裡，
+      // 中文：左／右在這一版不是測試鍵。它們仍然算在「任何按鍵」裡，
       // 所以只當中止鍵用，其他什麼都不做。
     }
     else {

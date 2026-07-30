@@ -109,6 +109,21 @@ void initialize() {
 	vexdash::watch_config("cascade_kD", &CASCADE_KD, "cascade/pid");
 	vexdash::watch_config("cascade_kG", &CASCADE_KG, "cascade/pid");
 
+#ifdef PID_TUNE_PROGRAM
+	// --- vexdash: cascade four-level height targets (tuning build only) ---
+	// Targets for the tuning program's B/Y/X/A level keys (see
+	// tune_opcontrol.cpp). Sliders instead of hardcoded numbers, same convention
+	// as the arm presets above; defaults follow ScoringLevel LEVEL_0..LEVEL_3
+	// (auton-routines.h), the values autonomous score() already drives to.
+	// 中文：調參版 B/Y/X/A 四段高度鍵的目標值（見 tune_opcontrol.cpp）。做成
+	// 滑桿、不寫死，跟上面手臂 preset 同一套慣例；預設值取自走 score() 已經在用
+	// 的 ScoringLevel LEVEL_0～LEVEL_3（auton-routines.h）。
+	vexdash::watch_config("cascade_LV0", &CASCADE_LV0_DEG, "cascade/presets");
+	vexdash::watch_config("cascade_LV1", &CASCADE_LV1_DEG, "cascade/presets");
+	vexdash::watch_config("cascade_LV2", &CASCADE_LV2_DEG, "cascade/presets");
+	vexdash::watch_config("cascade_LV3", &CASCADE_LV3_DEG, "cascade/presets");
+#endif
+
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches
 	vexdash::watch_config("run_drive",     &run_drive_test, "drive/test"); // toggle ON to drive
@@ -124,7 +139,42 @@ void initialize() {
 	vexdash::declare_device(arm_rotation.get_port(), vexdash::DeviceType::kRotation, "arm_rotation");
 
 	// --- vexdash: Device Map -- motors section ---
+	// Ports are written as literals on purpose: reversed motors are constructed
+	// with a NEGATIVE port and get_port() can return that negative value -- cast
+	// into declare_device()'s uint8_t it becomes e.g. 253 and the declaration is
+	// silently rejected (out of range 1~21). Keep in sync with robot-config.cpp.
+	// 中文：這裡故意寫埠號數字，不用 get_port()：反轉馬達是用「負埠號」建構的，
+	// get_port() 可能回傳負值，轉成 uint8_t 會變成 253 之類的數字而被靜默拒絕。
+	// 改接線時記得跟 robot-config.cpp 一起改。
+	vexdash::declare_device(4,  vexdash::DeviceType::kMotor, "left_front");
+	vexdash::declare_device(6,  vexdash::DeviceType::kMotor, "left_mid");
+	vexdash::declare_device(16, vexdash::DeviceType::kMotor, "left_back");
+	vexdash::declare_device(15, vexdash::DeviceType::kMotor, "right_front");
+	vexdash::declare_device(1,  vexdash::DeviceType::kMotor, "right_mid");
+	vexdash::declare_device(8,  vexdash::DeviceType::kMotor, "right_back");
+	vexdash::declare_device(5,  vexdash::DeviceType::kMotor, "intake");
+	vexdash::declare_device(7,  vexdash::DeviceType::kMotor, "cascade_1");
+	vexdash::declare_device(3,  vexdash::DeviceType::kMotor, "cascade_2");
 	vexdash::declare_device(arm.get_port(), vexdash::DeviceType::kMotor, "arm");
+	// NOTE: fwd_tracker (Rotation 2) and sideways_tracker (Rotation 1) in
+	// robot-config.cpp are placeholders for trackers the robot does not have,
+	// and their port numbers collide with real devices (distance_L on port 2,
+	// right_mid on port 1) -- they are deliberately NOT declared here.
+	// 中文：robot-config.cpp 裡的 fwd_tracker／sideways_tracker 是不存在的假
+	// tracker（隨手填的埠號還跟真裝置的 2、1 埠相撞），所以故意不宣告。
+
+	// --- vexdash: Device Map -- IMU ---
+	vexdash::declare_device(17, vexdash::DeviceType::kImu, "imu");
+
+	// --- vexdash: Device Map -- ADI (three-wire) devices ---
+	// There is no dedicated DeviceType for digital in/out, so these are declared
+	// as kUnknown: the port shows up on the map with its name, but no live values
+	// (ADI devices cannot be auto-detected anyway -- they are shown as declared).
+	// 中文：協定沒有「數位輸出／輸入」這種裝置型別，所以用 kUnknown 宣告——孔位圖
+	// 會顯示這個埠有名字，但沒有即時數值（ADI 本來就偵測不到插拔，照宣告顯示）。
+	vexdash::declare_device(vexdash::adi_port('A'), vexdash::DeviceType::kUnknown, "claw");
+	vexdash::declare_device(vexdash::adi_port('C'), vexdash::DeviceType::kUnknown, "toggle");
+	vexdash::declare_device(vexdash::adi_port('D'), vexdash::DeviceType::kUnknown, "cascade_limit");
 
 	// Start vexdash over the ESP32 Smart Port bridge (port 11 @ 115200 baud).
 	// The ESP32 relays telemetry to the dashboard over WiFi (ws://192.168.4.1).
