@@ -37,6 +37,14 @@ void initialize() {
 	vexdash::watch("arm_error",   &tele_arm_error,  "deg");
 	vexdash::watch("arm_output",  &tele_arm_output, "V");
 	vexdash::watch("arm_sensor_ok", &arm_sensor_ok);
+	// How much of arm_output comes from the gravity feedforward (0 until ARM_KG
+	// is tuned). The "arm/pid" path is a v1.4 CHANNEL_DEF field: it tells the
+	// dashboard to show this line next to the arm/pid sliders instead of
+	// guessing the grouping from the channel name.
+	// 中文：arm_output 裡有多少是重力前饋給的（ARM_KG 沒調之前一直是 0）。後面的
+	// "arm/pid" 是 v1.4 新增的分組欄位，明確告訴 dashboard 這條線跟 arm/pid 的
+	// 滑桿是同一組，不用讓它自己猜。
+	vexdash::watch("arm_ff", &tele_arm_ff, "V", -1, "arm/pid");
 
 	// --- vexdash: live arm tuning (sliders on the Config panel, auto write-back) ---
 	vexdash::watch_config("DOWN",  &ARM_DOWN_DEG,  "arm/presets");
@@ -46,6 +54,13 @@ void initialize() {
 	vexdash::watch_config("kP",    &ARM_KP,        "arm/pid");
 	vexdash::watch_config("kI",    &ARM_KI,        "arm/pid");
 	vexdash::watch_config("kD",    &ARM_KD,        "arm/pid");
+	// Gravity feedforward. kG = the voltage that just holds the arm still when
+	// it is HORIZONTAL; horizontal_deg = the arm_angle reading at that pose.
+	// Both default to 0, which means "feedforward off" -- same as before.
+	// 中文：重力前饋。kG＝手臂放水平時剛好撐住不掉的電壓；horizontal_deg＝那一刻
+	// arm_angle 讀到的角度。兩個都預設 0＝不啟用，跟以前一樣。
+	vexdash::watch_config("kG",    &ARM_KG,        "arm/pid");
+	vexdash::watch_config("horizontal_deg", &ARM_HORIZONTAL_DEG, "arm/pid");
 
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches

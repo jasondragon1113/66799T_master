@@ -45,6 +45,24 @@ float ARM_KI = 0.2;
 float ARM_KD = 0.5;
 float ARM_STARTI = 10; // max error (arm degrees) before the I term starts accumulating
 
+// Gravity feedforward, added on top of the PID output (see arm.h for the full
+// explanation). 0 keeps the old behaviour exactly: 0 * anything = 0, so the
+// output below is byte-for-byte the PID output until someone raises ARM_KG.
+//
+// How to find it (do this BEFORE touching kP/kI/kD -- feedforward first, gains
+// second, because once the feedforward carries the weight the gains only have
+// to clean up the leftovers and can stay gentle):
+//   1. Set ARM_HORIZONTAL_DEG to the arm_angle reading when the arm is level.
+//   2. Set ARM_KP/KI/KD to 0 on the dashboard so only the feedforward is left.
+//   3. Move the arm to horizontal, then raise ARM_KG until the arm just stops
+//      sagging (and does not creep upward). That number is ARM_KG.
+//   4. Put the gains back and re-tune kP -> kD -> kI from gentle values.
+// 中文：重力前饋，加在 PID 輸出上面。預設 0＝跟以前完全一樣。調法：先量水平角度、
+// 把 PID 三個增益暫時歸零、把手臂擺水平，慢慢加 ARM_KG 到「剛好不掉也不往上爬」，
+// 那就是 ARM_KG；之後才回頭調 kP → kD → kI（前饋扛重量，增益就能放溫和）。
+float ARM_KG = 0;
+float ARM_HORIZONTAL_DEG = 0;
+
 const int ARM_MAX_VOLTAGE = 97; // out of 127, clamps the PID output
 const int ARM_DOWN_MAX_VOLTAGE = 57; // out of 127, clamps output while descending so the arm goes down slower
 
@@ -64,6 +82,7 @@ float tele_arm_angle = 0;
 float tele_arm_target = 0;
 float tele_arm_error = 0;
 float tele_arm_output = 0;
+float tele_arm_ff = 0;
 
 // Last known-good angle, so a momentary sensor dropout doesn't read as 0 (which
 // would look like a huge error and slam the arm).
@@ -118,6 +137,17 @@ void arm_task(){
   PID armPID(0, ARM_KP, ARM_KI, ARM_KD, ARM_STARTI);
 
   while(true){
+    // Copy the live gains in every cycle so the dashboard sliders (ARM_KP/KI/KD
+    // are registered with watch_config in main.cpp) actually reach the PID.
+    // The PID object copies its gains in the constructor, so without this the
+    // sliders moved a number nobody read.
+    // 中文：每圈把可調增益抄進 PID。PID 是在建構時把 kp/ki/kd 複製走的，不重新抄
+    // 的話，dashboard 上拉滑桿只是改到一個沒人看的變數。
+    armPID.kp = ARM_KP;
+    armPID.ki = ARM_KI;
+    armPID.kd = ARM_KD;
+    armPID.starti = ARM_STARTI;
+
     float target = arm_target_degrees(arm_target);
     float position = arm_get_position_deg();
     float error = target - position;
@@ -131,12 +161,22 @@ void arm_task(){
     if(!arm_sensor_ok){
       arm.move(0);
       tele_arm_output = 0;
+      tele_arm_ff = 0;
       arm_settled = false;
       delay(10);
       continue;
     }
 
-    float output = armPID.compute(error);
+    // Gravity feedforward, added on top of the PID -- the shared PID class is
+    // NOT touched (drive and turn use the same class). Full push at horizontal,
+    // none when the arm points straight up or straight down. ARM_KG defaults to
+    // 0, so this whole line is a no-op until someone tunes it.
+    // 中文：重力前饋加在 PID 外面，共用的 PID class 一個字都沒改（底盤直走/轉彎也在
+    // 用它）。水平時給滿、垂直時給 0。ARM_KG 預設 0，沒調之前這行等於不存在。
+    float gravity_ff = ARM_KG * cosf(to_rad(position - ARM_HORIZONTAL_DEG));
+    tele_arm_ff = gravity_ff;
+
+    float output = armPID.compute(error) + gravity_ff;
 
     int max_voltage = output < 0 ? ARM_DOWN_MAX_VOLTAGE : ARM_MAX_VOLTAGE;
     output = clamp(output, (float)-max_voltage, (float)max_voltage);

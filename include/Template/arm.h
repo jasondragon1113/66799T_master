@@ -42,6 +42,24 @@ extern float ARM_KI;
 extern float ARM_KD;
 extern float ARM_STARTI;
 
+// Gravity feedforward: the extra push added on top of the PID output so the
+// PID does not have to "earn" the holding voltage with error. ARM_KG is the
+// voltage (same -127..127 units as arm.move()) that just barely holds the arm
+// still WHEN IT IS HORIZONTAL; away from horizontal it is scaled by
+// cos(angle), because a horizontal arm fights all of gravity and a vertical
+// arm fights none. 0 = feedforward off, i.e. exactly the old behaviour.
+// 中文：重力前饋。ARM_KG＝「手臂放到水平時，剛好撐住不掉下來」的電壓（跟
+// arm.move() 同樣的 -127~127 單位）。手臂離開水平後會自動乘 cos(角度)：水平最吃
+// 力、垂直不吃力。設 0＝不用前饋，跟以前一模一樣。
+extern float ARM_KG;
+
+// The arm angle (same degrees as the ARM_*_DEG presets) at which the arm is
+// physically HORIZONTAL. Only used to aim the cos() above. Measure it once:
+// move the arm level, read "arm_angle" on the dashboard, put that number here.
+// 中文：手臂「水平」時的角度讀數（跟預設位置同一套度數），只給上面的 cos() 用。
+// 量法：把手臂擺平，看 dashboard 的 arm_angle 是多少，填進來。
+extern float ARM_HORIZONTAL_DEG;
+
 // Separate, lower voltage cap applied whenever the PID output is driving the
 // arm downward (e.g. heading to DOWN), so it descends gently instead of
 // dropping at full speed. See arm_task() in arm.cpp.
@@ -64,6 +82,8 @@ extern float tele_arm_angle;   // current arm angle (deg)
 extern float tele_arm_target;  // target arm angle (deg)
 extern float tele_arm_error;   // target - current (deg)
 extern float tele_arm_output;  // arm PID output (volts)
+extern float tele_arm_ff;      // gravity feedforward part of the output (volts)
+                               // 中文：輸出裡屬於重力前饋的那一份
 
 // Current arm angle in degrees from the rotation sensor. Returns the last
 // valid reading if the sensor is unplugged.
