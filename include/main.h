@@ -50,6 +50,7 @@
 #include "Template/pure-pursuit/custom-math.h"
 #include "Template/drive.h"
 #include "Template/arm.h"
+#include "Template/cascade.h"
 #include "Template/pure-pursuit/parse-point-data.h"
 #include "intake.h"
 

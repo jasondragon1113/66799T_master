@@ -62,6 +62,26 @@ void initialize() {
 	vexdash::watch_config("kG",    &ARM_KG,        "arm/pid");
 	vexdash::watch_config("horizontal_deg", &ARM_HORIZONTAL_DEG, "arm/pid");
 
+	// --- vexdash: cascade (the lift on ports 7 / -2) live graph + tuning ---
+	// The "cascade/pid" path is the v1.4 CHANNEL_DEF grouping field, so these
+	// lines land next to the cascade sliders on the dashboard.
+	// 中文：cascade（7 與 -2 那支升降）的即時圖表與調參。"cascade/pid" 是 v1.4 的
+	// 分組欄位，會讓這幾條線跟 cascade 的滑桿排在一起。
+	vexdash::watch("cascade_pos",    &tele_cascade_pos,    "deg", -1, "cascade/pid");
+	vexdash::watch("cascade_target", &tele_cascade_target, "deg", -1, "cascade/pid");
+	vexdash::watch("cascade_error",  &tele_cascade_error,  "deg", -1, "cascade/pid");
+	vexdash::watch("cascade_output", &tele_cascade_output, "V",   -1, "cascade/pid");
+	vexdash::watch("cascade_ff",     &tele_cascade_ff,     "V",   -1, "cascade/pid");
+
+	// Tune in this order: kG first (the voltage that makes the lift hover),
+	// then kP, then kD, and kI only if it keeps stopping just short.
+	// 中文：調參順序：先 kG（讓升降停在半空中不動的電壓），再 kP，再 kD，每次都差
+	// 一點點才動 kI。
+	vexdash::watch_config("kP", &CASCADE_KP, "cascade/pid");
+	vexdash::watch_config("kI", &CASCADE_KI, "cascade/pid");
+	vexdash::watch_config("kD", &CASCADE_KD, "cascade/pid");
+	vexdash::watch_config("kG", &CASCADE_KG, "cascade/pid");
+
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches
 	vexdash::watch_config("run_drive",     &run_drive_test, "drive/test"); // toggle ON to drive
@@ -92,6 +112,10 @@ void initialize() {
 
 	start_dashboard();
 	start_arm_task();
+	// The cascade controller starts DISABLED; control_arcade() switches it on
+	// for driver control and autonomous() switches it back off.
+	// 中文：cascade 控制器一開始是關著的，遙控 control_arcade() 才打開，自走再關掉。
+	start_cascade_task();
 }
 
 void disabled() {
@@ -119,6 +143,16 @@ void autonomous() {
 	// physical bottom the robot is placed at before a match.
 	cascade1.tare_position();
 	cascade2.tare_position();
+	cascade_notify_tare();
+
+	// Autonomous drives the cascade with move_absolute() (see score() in
+	// auton-routines.cpp), so the teleop cascade controller must stay out of the
+	// way -- otherwise the two would fight over the same two motors. It is off
+	// by default; this line matters when a match runs teleop before autonomous.
+	// 中文：自走是用 move_absolute() 開 cascade（見 auton-routines.cpp 的 score()），
+	// 所以遙控用的 cascade 控制器要退場，不然兩邊會搶同兩顆馬達。它本來就預設關著，
+	// 這一行是為了「先跑過遙控再跑自走」的情況。
+	cascade_control_set_enabled(false);
 
 	//route: whichever is selected on the dashboard's Auton Select tab
 	switch (selected_auton) {
