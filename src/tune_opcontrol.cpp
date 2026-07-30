@@ -23,8 +23,8 @@
 //   L2    後退 50 cm         chassis.drive_distance(-50cm→吋)
 //   R1    左轉 90°           chassis.turn_to_angle(現在朝向 - 90)
 //   R2    右轉 180°          chassis.turn_to_angle(現在朝向 + 179.5)
-//   A     滑軌升到高目標     cascade_set_target(CASCADE_PRESET_2_DEG = 595)
-//   B     滑軌降到低目標     cascade_set_target(CASCADE_LEFT_FINAL_DEG = 0)
+//   A     滑軌升到高目標     tune_cascade_goto(CASCADE_PRESET_2_DEG = 595)
+//   B     滑軌降到低目標     tune_cascade_goto(CASCADE_LEFT_FINAL_DEG = 0)
 //   UP    手臂抬到 POS_2     arm_set_position(ArmPosition::POS_2)
 //   DOWN  手臂回 DOWN        arm_set_position(ArmPosition::DOWN)
 //   左搖桿 Y／右搖桿 X       正常方向盤式駕駛（沒有測試動作在跑的時候才有效），
@@ -32,6 +32,18 @@
 //
 // 中止：**動作進行中按任何一顆按鍵**（同一顆也算）就中止——遙控器震一下、
 // 底盤電壓歸零、滑軌／手臂就地停住。搖桿大幅推動（超過 25／127）也會中止。
+//
+// ---------------------------------------------------------------------------
+// 機構保護：跟駕駛版同一套
+// ---------------------------------------------------------------------------
+// 這一版跑的是**同一支** arm_task() 與 cascade_task()，所以手臂軟行程夾限
+// （arm.cpp:141 / hold 走 arm.cpp:176）、手臂下降降壓（arm.cpp:207）、滑軌上下
+// 分別限壓（cascade.cpp:176-177）全部照舊生效，不用也不該在這裡重做。
+// 另外兩層是這個檔案自己補的，因為它們原本長在 Drive::control_arcade() 裡：
+//   - tune_service_cascade_limit()：限位開關歸零＋自癒，主迴圈每圈跑
+//     （逐行照抄 drive.cpp:944-953，含 Z1 補的 cascade_notify_tare()）
+//   - tune_cascade_goto()：所有滑軌命令都先夾到 [0, CASCADE_EXTEND_LIMIT_DEG]，
+//     用的是 Template/cascade.h 那一份共用常數，沒有另抄數字
 //
 // ---------------------------------------------------------------------------
 // 為什麼手臂是 POS_2／DOWN，不是教練說的 120°／10°
@@ -280,6 +292,56 @@ void restore_voltage_caps(){
   chassis.turn_max_voltage = saved_turn_max_voltage;
 }
 
+// --- the driving program's cascade protections, verbatim --------------------
+//
+// Send the cascade somewhere, clamped to the SAME travel limit the driving
+// program uses. CASCADE_EXTEND_LIMIT_DEG comes from Template/cascade.h -- the
+// one copy the teleop buttons and the controller already share -- so this is
+// not a second number that can drift away from it.
+//
+// cascade_set_target() clamps to exactly this range on its own
+// (src/Template/cascade.cpp:59), so this is belt and braces rather than the
+// only guard. It is here so the clamp is visible at the point where a tuning
+// button chooses a target: if someone retargets A/B by editing the presets in
+// drive.cpp, the limit is enforced right here too, not only two files away.
+// 中文：把滑軌送到某個位置，並且夾在**跟駕駛版同一個**行程上限
+// （CASCADE_EXTEND_LIMIT_DEG 來自 Template/cascade.h，就是遙控按鍵與控制器共用的
+// 那一份，不是另外抄一個數字）。cascade_set_target() 本身就已經夾同一個範圍
+// （cascade.cpp:59），所以這裡是多一層保險；放在「按鍵決定目標」的地方是為了
+// 讓夾限看得見——以後有人改 drive.cpp 裡的 preset 數字，這裡一樣擋得住。
+void tune_cascade_goto(float deg){
+  cascade_set_target(clamp(deg, 0.0f, CASCADE_EXTEND_LIMIT_DEG));
+}
+
+// The limit switch on ADI 'D' reads 1 when pressed. Every time it triggers,
+// re-zero both cascade encoders so the physical hard stop is always "0 degrees"
+// -- this is what corrects encoder drift picked up over a long session.
+//
+// This is Drive::control_arcade()'s block (src/Template/drive.cpp:944-953)
+// copied verbatim, INCLUDING Z1's cascade_notify_tare(): the controller's target
+// is in the same frame that was just re-zeroed so nothing needs re-aiming, but
+// the PID's accumulated and previous error must be cleared or the position jump
+// reads as a fake error spike in the I and D terms.
+//
+// The tuning program used to be the one place without this, which meant the
+// cascade's zero could drift over a long tuning session and every cascade
+// number on the graph would quietly be measured from the wrong origin.
+// 中文：ADI 'D' 的限位開關壓到會讀 1。每次壓到就把兩顆滑軌編碼器歸零，讓物理底部
+// 永遠等於「0 度」——這就是長時間調參後修正編碼器漂移的機制。
+// 這段是 Drive::control_arcade()（drive.cpp:944-953）原封不動搬過來的，**包含 Z1
+// 補的 cascade_notify_tare()**：控制器的目標跟編碼器是同一套座標，歸零後不用重設
+// 目標，但 PID 的積分與「上一次誤差」一定要清掉，不然位置突跳會被 I／D 當成真的
+// 誤差爆一下。
+// 原本調參版是唯一沒有這段的地方，代表長時間調參後滑軌的原點會漂掉，圖表上每一個
+// cascade 數字都是從錯的原點量出來的。
+void tune_service_cascade_limit(){
+  if(cascade_limit.get_value() == 1){
+    cascade1.tare_position();
+    cascade2.tare_position();
+    cascade_notify_tare();
+  }
+}
+
 // Stop a running chassis move NOW. Called from the button loop AND from the
 // competition watchdog, possibly at the same time -- which is why there is no
 // mutex here. Every step is idempotent (zero the caps, wait for the move to
@@ -358,8 +420,13 @@ void abort_active_test(bool buzz){
       break;
     case ActiveTest::CASCADE:
       // Park the lift on its current position: the PID then holds it instead of
-      // leaning on a target it was told to stop chasing.
-      cascade_set_target(cascade_get_position_deg());
+      // leaning on a target it was told to stop chasing. Clamped like every
+      // other cascade command -- if the lift has been pushed past the limit by
+      // hand, "hold where you are" must still resolve to a legal target.
+      // 中文：把滑軌停在現在的位置，PID 就地撐住，不會對著一個已經放棄的目標死推。
+      // 跟其他所有滑軌命令一樣要夾限——萬一機構被人推超過上限，「停在原地」也必須
+      // 收斂成一個合法的目標。
+      tune_cascade_goto(cascade_get_position_deg());
       break;
     case ActiveTest::ARM:
       arm_hold_here();
@@ -426,7 +493,7 @@ void tune_opcontrol(){
   cascade1.tare_position();
   cascade2.tare_position();
   cascade_notify_tare();
-  cascade_set_target(0);
+  tune_cascade_goto(0);
   cascade_control_set_enabled(true);
 
   static pros::Task move_worker(tune_move_worker, "tune move");
@@ -463,6 +530,19 @@ void tune_opcontrol(){
       pros::delay(TUNE_LOOP_MS);
       continue;
     }
+
+    // ---- cascade limit switch self-heal, every cycle ------------------------
+    // Placed here, after the competition lockout and BEFORE the "a test is
+    // running" branch below, so it runs on every path teleop can take -- idle,
+    // driving on the sticks, and mid-test -- exactly like control_arcade()
+    // runs it on every pass of its own loop. Skipped while disabled or in
+    // autonomous for the same reason control_arcade() is: it is not running
+    // then either.
+    // 中文：放在比賽鎖之後、「有測試在跑」那個分支之前，所以遙控期的每一條路徑
+    // （閒置、用搖桿開車、測試進行中）每一圈都會跑到，跟 control_arcade() 在自己
+    // 迴圈裡每一圈都做是一樣的。比賽被鎖住時不做，理由也一樣：那時候駕駛版的
+    // control_arcade() 本來也沒在跑。
+    tune_service_cascade_limit();
 
     // ---- read every button once --------------------------------------------
     bool b_l1   = tune_master.get_digital(DIGITAL_L1);
@@ -542,13 +622,13 @@ void tune_opcontrol(){
       else if(b_r1)   request_chassis_move(ChassisMove::TURN_LEFT,  "TURN L90");
       else if(b_r2)   request_chassis_move(ChassisMove::TURN_RIGHT, "TURN R180");
       else if(b_a){
-        cascade_set_target((float)CASCADE_PRESET_2_DEG);
+        tune_cascade_goto((float)CASCADE_PRESET_2_DEG);
         active_test = ActiveTest::CASCADE;
         test_started_ms = pros::millis();
         screen_set(1, "CASC UP");
       }
       else if(b_b){
-        cascade_set_target((float)CASCADE_LEFT_FINAL_DEG);
+        tune_cascade_goto((float)CASCADE_LEFT_FINAL_DEG);
         active_test = ActiveTest::CASCADE;
         test_started_ms = pros::millis();
         screen_set(1, "CASC DOWN");

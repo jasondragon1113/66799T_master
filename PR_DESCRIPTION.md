@@ -333,6 +333,27 @@ if (time_spent_running>timeout && timeout != 0) return true;
 依賴 `*_timeout` 不為 0（見 6.4 最後一段）。想調這幾個要改
 `src/robot-config.cpp` 的 `default_constants()` 再重編。
 
+### 6.4b 調參版的機構保護＝駕駛版同款
+
+調參版一開始少了幾層駕駛版本來就有的保護，這裡補齊。**用的是同一份常數、同一個函式，
+不是另外抄一份數字。**
+
+| 保護 | 駕駛版在哪裡 | 調參版 | 用的是同一份嗎 |
+|---|---|---|---|
+| **限位開關歸零＋自癒**（ADI `'D'` 壓到＝1 → 兩顆滑軌編碼器 `tare_position()`＋`cascade_notify_tare()` 清積分／前次誤差） | `Drive::control_arcade()`，`src/Template/drive.cpp:944-953` | `tune_service_cascade_limit()`，主迴圈**每一圈**呼叫（閒置／搖桿駕駛／測試進行中都會跑） | ✅ 邏輯逐行照抄，**含 Z1 補的 `cascade_notify_tare()`** |
+| **滑軌行程夾限 `[0, CASCADE_EXTEND_LIMIT_DEG]`** | `cascade_set_target()`，`src/Template/cascade.cpp:59`；控制器每圈再夾一次 `cascade.cpp:165` | 所有滑軌命令（A／B／中止歸位／開場歸零）都走 `tune_cascade_goto()`，先夾再送 | ✅ 用 `Template/cascade.h` 的 `CASCADE_EXTEND_LIMIT_DEG`——就是遙控按鍵與控制器共用的那一份，**沒有另抄數字** |
+| **手臂軟行程夾限 `[ARM_MIN_DEG, ARM_MAX_DEG]`** | `arm_target_degrees()`，`src/Template/arm.cpp:141` | 同一個函式（UP／DOWN 走 `arm_set_position()`）；中止用的 hold 也夾同一組：`arm.cpp:176` | ✅ 完全同一組常數與同一支 `arm_task()` |
+| **手臂下降降壓**（往下時改用較低的 `ARM_DOWN_MAX_VOLTAGE`） | `arm_task()`，`src/Template/arm.cpp:207` | **就是同一行**——調參版沒有另外一支手臂迴圈，UP／DOWN／hold 全都經過它 | ✅ |
+| **滑軌上／下分別限壓**（上 100、下 97） | `cascade_task()`，`src/Template/cascade.cpp:176-177` | 同上，調參版沒有另外一支滑軌迴圈 | ✅ |
+
+第 3～5 項本來就成立（調參版沒有自己的 arm／cascade 控制迴圈，A／B／UP／DOWN 只是設目標，
+真正出力的還是既有的 `arm_task()` / `cascade_task()`），上面附行號當證據。
+第 1～2 項是這一次補的。
+
+> 註：`tune_cascade_goto()` 的夾限跟 `cascade_set_target()` 內建的夾限重複，是刻意的。
+> 放在「按鍵決定目標」的地方，是為了讓夾限在你改 A／B 目標的那一行旁邊就看得到——
+> 以後有人去改 `drive.cpp` 裡的 preset 數字，這裡一樣擋得住，不必記得兩個檔案外還有一層。
+
 ### 6.5 比賽狀態下強制關閉
 
 - 主迴圈每一圈都看 `pros::competition::is_disabled() || is_autonomous()`，成立就**不收任何按鍵**、
@@ -403,7 +424,8 @@ if (time_spent_running>timeout && timeout != 0) return true;
 | LEFT | LEFT 預設序列 | 無動作（中止鍵） |
 | RIGHT | RIGHT 預設序列 | 無動作（中止鍵） |
 | 搖桿 | 方向盤式駕駛＋黏著煞車模式 | 方向盤式駕駛（沒有黏著煞車邏輯；測試動作跑的時候失效） |
-| 限位開關歸零 | 有 | **沒有**（調參版沒有跑 `control_arcade()` 那段自癒；A／B 測試前記得先把滑軌降到底一次，開場的 tare 就是在那個位置歸零的） |
+| 限位開關歸零／自癒 | 有 | **有**（`tune_service_cascade_limit()`，每圈檢查，邏輯與駕駛版一致——見 6.4b） |
+| 滑軌行程夾限、手臂軟行程夾限、手臂下降降壓 | 有 | **有**，同一份常數同一支控制迴圈（見 6.4b） |
 
 **正常版那一欄跟第二節那張表完全一致——這個 PR 的第六節沒有動它任何一格。**
 
@@ -417,8 +439,10 @@ if (time_spent_running>timeout && timeout != 0) return true;
   燒錄 checklist。
 - **一樣沒有上車驗過**，也沒有真的跑過 `pros make`（沒有 ARM toolchain）。做的是主機端語法門
   ＋ Makefile 的 `-n` 乾跑，見下。
-- **調參版沒有限位開關自癒**（見上表）。刻意的：那段邏輯長在 `control_arcade()` 裡面，
-  要拿來用就得動正常駕駛面。代價是滑軌編碼器在長時間調參後可能會漂——重開一次程式就好。
+- ~~調參版沒有限位開關自癒~~ **已補**：見 6.4b。做法是在 `tune_opcontrol.cpp` 裡放一份等價的
+  `tune_service_cascade_limit()`（邏輯逐行照抄 `drive.cpp:944-953`，含 `cascade_notify_tare()`），
+  而**不是**把那段從 `control_arcade()` 抽成共用函式——抽出來就會動到已經驗收過的駕駛面。
+  代價是這段邏輯有兩份，改一邊要記得改另一邊；`drive.cpp` 那份是母本。
 - **中止底盤動作之後，最多要等 3 秒**那支動作才真的結束（輪子在第一個 10 ms 就已經 0 V 了，
   等的只是迴圈自己逾時）。這 3 秒內不收新的測試指令。這是為了不砍 task（見 6.4）付的代價。
 - **調參版沒有自走保護以外的比賽適應**。它本來就不該上場：燒 slot 2、比賽選 slot 1。
