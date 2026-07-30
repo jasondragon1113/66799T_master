@@ -63,7 +63,22 @@ TEMPLATE_FILES=$(INCDIR)/$(LIBNAME)/*.h $(INCDIR)/$(LIBNAME)/*.hpp
 # The clean is mandatory -- only a -D flag changes, which make cannot see in the
 # timestamps.
 ################################################################################
-.PHONY: tune
+.PHONY: tune comp
 tune:
 	$(MAKE) clean
 	$(MAKE) quick EXTRA_CXXFLAGS="-DPID_TUNE_PROGRAM"
+
+# 回到比賽版一定要走這個 target（或自己先 pros make clean）。
+#
+# 為什麼：`tune` 進去會 clean、**出來不會**。跑完 `pros make tune` 之後 bin/ 裡每一個
+# .o 都帶著 -DPID_TUNE_PROGRAM；這時直接 `pros mu --slot 1`（預設目標 quick 不會
+# clean）的話，make 看檔案時間戳會判定「都是最新的、不用重編」，於是把**調參版的
+# 二進位**燒進比賽 slot。一個 -D 旗標的差異，make 從時間戳看不出來。
+#
+# comp: is the symmetric partner of tune:. `tune` cleans on the way IN but not on
+# the way OUT, so after a tuning build every object file carries
+# -DPID_TUNE_PROGRAM and a plain `pros mu` would be judged up-to-date and ship
+# the TUNING binary to the competition slot. Always come back through here.
+comp:
+	$(MAKE) clean
+	$(MAKE) quick

@@ -87,14 +87,39 @@ constexpr float TUNE_TURN_RIGHT_DEG = 179.5f;
 
 constexpr int TUNE_LOOP_MS = 10;
 
-// How long a chassis move is given to notice the zeroed voltage caps and fall
-// out of its own loop. The JAR exit conditions time out at 3000 ms (drive) and
-// 2000 ms (turn) -- see default_constants() in robot-config.cpp -- so 4000 is a
-// ceiling, not an expected wait. The wheels are already at 0 V the whole time.
-// 中文：中止後等底盤那支動作自己跑完的上限。JAR 的逾時是直走 3 秒、轉彎 2 秒，
-// 所以 4 秒是「絕對不會超過」的天花板，不是真的要等這麼久；這段期間輪子早就
-// 已經是 0 V 了。
-constexpr int TUNE_ABORT_WAIT_MS = 4000;
+// The whole abort mechanism leans on ONE property of the JAR moves: that they
+// eventually fall out of their own loop. PID::is_settled() says so explicitly:
+//
+//     if (time_spent_running>timeout && timeout != 0) return true;
+//     // If timeout does equal 0, the move will never actually time out.
+//     // Setting timeout to 0 is the equivalent of setting it to infinity.
+//
+// So a drive_timeout or turn_timeout of 0 means the move NEVER ends, the abort
+// wait below never completes, and the voltage caps would stay pinned at 0
+// forever -- a robot that cannot move until it is rebooted.
+//
+// Rather than paper over that in the abort path (restoring the caps while the
+// move is still looping would un-abort it at full power, which is worse than
+// being stuck), this build refuses to run with a zero timeout at all: see
+// enforce_move_timeouts(), called before any test can be started. These are the
+// values default_constants() uses, and are only ever applied if someone edited
+// the timeout to 0.
+// 中文：整套中止機制只靠一件事：那兩個動作最後會自己結束。PID::is_settled() 白紙
+// 黑字寫著 timeout 設 0 等於無限大＝永遠不會結束。真的設 0 的話，下面的等待就永遠
+// 等不完，電壓上限會永遠停在 0——車子在重開機之前動不了。
+// 這裡不在中止流程裡硬掰（動作還在跑就把上限還回去＝剛剛的中止白做、而且是滿電壓
+// 復活，比動不了更糟），而是直接不讓這一版帶著 0 逾時上路：見 enforce_move_timeouts()，
+// 在任何測試能被啟動之前就跑過了。下面兩個數字就是 default_constants() 的原值，
+// 只有在有人把逾時改成 0 的時候才會被套上。
+constexpr float TUNE_MIN_DRIVE_TIMEOUT_MS = 3000;
+constexpr float TUNE_MIN_TURN_TIMEOUT_MS = 2000;
+
+// Extra head-room on top of the longer of the two timeouts before the abort
+// wait gives up. Derived at abort time from the LIVE values, so it stays honest
+// if someone lengthens a timeout in default_constants().
+// 中文：等待上限＝兩個逾時裡比較長的那個再加這麼多。是在中止當下讀「現在的值」
+// 算出來的，所以有人把逾時改長也不會失準。
+constexpr int TUNE_ABORT_WAIT_MARGIN_MS = 1000;
 
 // A mechanism test that never arrives gets parked instead of left leaning on an
 // unreachable target (a stalled motor pulling stall current) -- same reasoning
@@ -221,6 +246,33 @@ void save_voltage_caps(){
   caps_saved = true;
 }
 
+// Refuse to run with an exit-condition timeout of 0 (== infinity, see the
+// comment on TUNE_MIN_*_TIMEOUT_MS). Returns true if it had to patch something,
+// so the caller can say so on the controller. Written as !(x > 0) rather than
+// x == 0 so a NaN is caught too.
+// 中文：不接受逾時 0（＝無限大，理由見上面）。有補過就回 true，讓呼叫端在手把上
+// 講一聲。寫成 !(x > 0) 而不是 x == 0，是為了連 NaN 也一起擋掉。
+bool enforce_move_timeouts(){
+  bool patched = false;
+  if(!(chassis.drive_timeout > 0)){
+    chassis.drive_timeout = TUNE_MIN_DRIVE_TIMEOUT_MS;
+    patched = true;
+  }
+  if(!(chassis.turn_timeout > 0)){
+    chassis.turn_timeout = TUNE_MIN_TURN_TIMEOUT_MS;
+    patched = true;
+  }
+  return patched;
+}
+
+// Longest the abort wait is allowed to take, derived from the live timeouts.
+int abort_wait_limit_ms(){
+  float longest = chassis.drive_timeout > chassis.turn_timeout
+                    ? chassis.drive_timeout : chassis.turn_timeout;
+  if(!(longest > 0)) longest = TUNE_MIN_DRIVE_TIMEOUT_MS; // belt and braces
+  return (int)longest + TUNE_ABORT_WAIT_MARGIN_MS;
+}
+
 void restore_voltage_caps(){
   if(!caps_saved) return;
   chassis.drive_max_voltage = saved_drive_max_voltage;
@@ -259,8 +311,9 @@ void abort_chassis_move(){
   // 下面的等待就會接住它，不會有動作漏網。
   pros::delay(TUNE_LOOP_MS * 3);
 
+  const int limit = abort_wait_limit_ms();
   int waited = 0;
-  while(move_running && waited < TUNE_ABORT_WAIT_MS){
+  while(move_running && waited < limit){
     pros::delay(TUNE_LOOP_MS);
     waited += TUNE_LOOP_MS;
   }
@@ -269,7 +322,23 @@ void abort_chassis_move(){
   // is still looping would un-abort it at full power.
   // 中文：確定動作真的結束了才把電壓上限還回去。還在跑的時候還回去＝剛剛的中止
   // 白做了，而且是滿電壓復活。
-  if(!move_running) restore_voltage_caps();
+  if(!move_running){
+    restore_voltage_caps();
+  }
+  else {
+    // Should be unreachable: enforce_move_timeouts() runs before any test can
+    // start, so both timeouts are non-zero and the wait above outlasts them.
+    // If it ever happens the caps STAY at 0 -- a robot that will not move is
+    // the safe failure here, and a robot that resumes a 180 turn you already
+    // aborted is not. Shout about it instead of quietly recovering.
+    // 中文：照理到不了這裡（測試開始前 enforce_move_timeouts() 已經保證兩個逾時
+    // 都不是 0，等待時間一定撐得比它們久）。萬一真的發生，電壓上限就**留在 0**
+    // ——這裡「車子不會動」是安全的失敗，「已經中止的 180 度轉彎自己復活」不是。
+    // 所以寧可大聲抱怨，也不要安靜地把電壓還回去。
+    screen_set(1, "!ABORT STUCK!");
+    screen_set(2, "REBOOT ROBOT");
+    tune_master.rumble("---");
+  }
   chassis.drive_stop(MotorBrake::coast);
 }
 
@@ -371,6 +440,15 @@ void tune_opcontrol(){
   screen_set(0, "== PID TUNE ==");
   screen_set(1, "READY");
   screen_set(2, "L1F L2B R1L R2R");
+
+  // Runs BEFORE the button loop, i.e. before any test can be started, so the
+  // abort path can rely on both timeouts being finite. See TUNE_MIN_*_TIMEOUT_MS.
+  // 中文：在按鍵迴圈之前跑，也就是在任何測試能被啟動之前，中止流程才能放心假設
+  // 兩個逾時都是有限的。
+  if(enforce_move_timeouts()){
+    screen_set(1, "TIMEOUT=0 FIXED");
+    tune_master.rumble("- -");
+  }
 
   bool last_any = false;
 

@@ -218,20 +218,26 @@ g++ -std=c++20 -D_USE_MATH_DEFINES -fsyntax-only -w \
 
 | | 正常比賽版 | 調參版 |
 |---|---|---|
-| 編譯 | `pros mu --slot 1`（照舊，什麼都不用加） | `pros make tune` |
-| 上傳 | 同上 | `pros upload --slot 2 --name "66799T TUNE"` |
+| 編譯 | **`pros make comp`** | `pros make tune` |
+| 上傳 | `pros upload --slot 1` | `pros upload --slot 2 --name "66799T TUNE"` |
 | slot | **1** | **2** |
 | 比賽時 | **只用 slot 1** | 絕對不要選它 |
 
-`pros make tune` 是 Makefile 新增的 target，內容等同這兩行：
+兩個都是 Makefile 新增的 target，各自等同這兩行：
 
 ```
-pros make clean
-pros make EXTRA_CXXFLAGS=-DPID_TUNE_PROGRAM
+pros make clean && pros make EXTRA_CXXFLAGS=-DPID_TUNE_PROGRAM   # = pros make tune
+pros make clean && pros make                                     # = pros make comp
 ```
 
-**`clean` 不能省。** 這次唯一的差別只有一個 `-D` 旗標，make 從檔案時間戳看不出任何檔案「變舊」，
-不清乾淨會拿到一半調參版、一半正常版的物件檔。
+**`clean` 兩個方向都不能省，回比賽版那個方向尤其不能省。**
+這次唯一的差別只有一個 `-D` 旗標，make 從檔案時間戳看不出任何檔案「變舊」。
+
+> ⚠️ **回比賽版一定要走 `pros make comp`（或自己先 `pros make clean`）。**
+> `tune` 只在**進去**的時候 clean，**出來不會**。跑完 `pros make tune` 之後 `bin/` 裡每一個
+> `.o` 都帶著 `-DPID_TUNE_PROGRAM`；這時直接 `pros mu --slot 1`（預設目標 `quick` 不會 clean）
+> 的話，make 會判定「都是最新的、不用重編」，**把調參版的二進位燒進比賽 slot**。
+> 燒完的檢查方式：開機進 slot 1，遙控器螢幕**不應該**出現 `== PID TUNE ==`、開場**不應該**震兩下。
 
 （`EXTRA_CXXFLAGS` 是 PROS 的 Makefile 本來就留的鉤子，在 `common.mk` 的 C++ 編譯規則裡；
 命令列給的變數會蓋掉 Makefile 裡的空值。這條有實際用 GNU Make 4.4.1 跑 `-n` 驗過，
@@ -280,6 +286,53 @@ pros make EXTRA_CXXFLAGS=-DPID_TUNE_PROGRAM
 task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vexdash）就跟著壞掉。
 所以改成「把電壓夾成 0，讓它自己安靜地跑完」——停車一樣快，但不會弄壞別的東西。
 
+**逾時 0 的防呆**：上面這套「讓它自己跑完」完全依賴一件事——那兩個動作最後真的會結束。
+而 `PID::is_settled()` 白紙黑字寫著：
+
+```
+if (time_spent_running>timeout && timeout != 0) return true;
+// If timeout does equal 0, the move will never actually time out.
+// Setting timeout to 0 is the equivalent of setting it to infinity.
+```
+
+也就是說，只要有人把 `drive_timeout` 或 `turn_timeout` 改成 0，動作就**永遠不會結束**，
+中止的等待也永遠等不完，電壓上限會**永遠停在 0**——車子在重開機之前動不了。
+
+處理方式是**斷根**而不是在中止流程裡硬掰：`tune_opcontrol()` 在按鍵迴圈開始之前
+（＝任何測試能被啟動之前）先跑 `enforce_move_timeouts()`，發現任一逾時不是正數（`0`／NaN 都算）
+就補回 `default_constants()` 的原值（直走 3000、轉彎 2000），並在手把顯示 `TIMEOUT=0 FIXED`＋震動。
+中止的等待上限也改成從**當下的**逾時值算出來（兩者取大再加 1 秒），有人把逾時改長也不會失準。
+
+萬一還是走到「等超時了動作仍在跑」那條路（照理不可能），電壓上限會**留在 0**，
+手把顯示 `!ABORT STUCK! / REBOOT ROBOT`＋長震。這是刻意的取捨：
+**「車子不會動」是安全的失敗，「已經中止的 180 度轉彎自己滿電壓復活」不是。**
+
+### 6.4a 增益怎麼吃到 dashboard 的值（含新增的 heading 三顆滑桿）
+
+**新增：`heading_kP` / `heading_kI` / `heading_kD`（群組 `heading/pid`）。**
+`drive_distance()` 不是只跑一組 PID——它**同時**跑第二組 heading PID，那才是「開直線不歪」
+的那一組（也是你給它一個不同朝向時畫弧的那一組）。原本只掛了 `drive_*`，等於只調得到
+「開多遠」、調不到「開多直」；而車子跑歪看起來很像 `drive_kD` 沒調好，其實是 `heading_kP` 沒調。
+名字照第二節的規矩加機構前綴，全車唯一。
+
+| 機構 | 滑桿 | 什麼時候被讀進 PID |
+|---|---|---|
+| 底盤直走 | `drive_kP` / `drive_kI` / `drive_kD` | **每次呼叫 `drive_distance()` 時**（PID 物件在函式開頭建構、複製增益） |
+| 底盤循跡 | `heading_kP` / `heading_kI` / `heading_kD`（新增） | 同上，同一次呼叫裡的第二個 PID 物件 |
+| 轉彎 | `turn_kP` / `turn_kI` / `turn_kD` | **每次呼叫 `turn_to_angle()` 時** |
+| 手臂 | `arm_kP/kI/kD/kG`、`arm_horizontal_deg` | **每一圈**（第二節已修成每圈重抄） |
+| 滑軌 | `cascade_kP/kI/kD/kG` | **每一圈**（第三節已修成每圈重抄） |
+
+所以底盤那四組的操作順序是**先拉滑桿、再按鍵**：每按一次鍵＝重新讀一次滑桿現值，
+動作跑到一半才拉滑桿不會影響那一次動作（要看階躍響應，這反而是對的行為）。
+調參版**刻意不呼叫 `default_constants()`**——呼叫的話會把 dashboard 上剛調好的增益
+覆蓋回程式碼裡的硬編值；`initialize()` 已經呼叫過一次，開機值本來就是對的。
+
+**沒有開成滑桿的東西**：exit conditions（`drive_settle_error` / `drive_settle_time` /
+`drive_timeout`，以及 turn 的那三個）刻意留在程式碼裡，理由是保持面板簡單、而且中止機制
+依賴 `*_timeout` 不為 0（見 6.4 最後一段）。想調這幾個要改
+`src/robot-config.cpp` 的 `default_constants()` 再重編。
+
 ### 6.5 比賽狀態下強制關閉
 
 - 主迴圈每一圈都看 `pros::competition::is_disabled() || is_autonomous()`，成立就**不收任何按鍵**、
@@ -297,9 +350,11 @@ task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vex
    開場震兩下**——看到這個才是調參版。
 3. dashboard 連上（`ws://192.168.4.1`），打開 Graph 面板。
 4. **拉滑桿 → 按鍵實跑 → 看曲線**，一次只動一個增益：
-   - 底盤直走：拉 `drive_kP` / `drive_kI` / `drive_kD` → 按 **L1**（前進 50 cm）→
+   - 底盤直走「開多遠」：拉 `drive_kP` / `drive_kI` / `drive_kD` → 按 **L1**（前進 50 cm）→
      看 `drive_error` / `drive_target` / `drive_output` 三條線。回不去就按 **L2** 開回來，
      或直接用搖桿把車推回起點。
+   - 底盤直走「開多直」：拉 `heading_kP` / `heading_kI` / `heading_kD`（新增，見 6.4a）→
+     一樣按 **L1**／**L2**，看車尾有沒有偏。**車子跑歪先調這一組**，不是 `drive_kD`。
    - 轉彎：拉 `turn_kP` / `turn_kI` / `turn_kD` → 按 **R1**（左 90°）或 **R2**（右 180°）→
      看 `turn_error` / `turn_target` / `turn_output`。
    - 滑軌：拉 `cascade_kG` → `cascade_kP` → `cascade_kD` → 按 **A**／**B** →
@@ -312,10 +367,13 @@ task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vex
    滑桿現值**；動作跑到一半才拉滑桿不會影響那一次動作（要看階躍響應，這反而是對的行為）。
    手臂與滑軌是每圈重抄（第二、三節已修），拉了立刻生效。
 6. 調完的數字**一定要抄回程式碼再重燒正常版**——dashboard 上調的值斷電就沒了。
-   - 底盤／轉彎：`src/robot-config.cpp` 的 `default_constants()`
+   - 底盤直走／循跡／轉彎：`src/robot-config.cpp` 的 `default_constants()`
+     （分別是 `set_drive_constants` / `set_heading_constants` / `set_turn_constants`）
    - 手臂：`src/Template/arm.cpp` 上方
    - 滑軌：`src/Template/cascade.cpp` 上方
-7. **抄完記得重燒 slot 1**，並確認比賽當天選的是 slot 1。
+7. **抄完用 `pros make comp` 重編、燒 slot 1**，並確認比賽當天選的是 slot 1。
+   **不可以直接 `pros mu --slot 1`**——那樣會把上一輪調參版的物件檔原封不動燒進比賽 slot
+   （原因見 6.2 的警告框）。燒完開機確認 slot 1 的遙控器螢幕**沒有** `== PID TUNE ==`。
 
 ### 6.7 這一段動了哪些檔案
 
@@ -323,9 +381,9 @@ task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vex
 |---|---|---|
 | `src/tune_opcontrol.cpp`（新） | 整支調參程式 | **無**——整個檔案包在 `#ifdef PID_TUNE_PROGRAM` 裡，正常版編出來是空的 |
 | `include/tune_opcontrol.h`（新） | 一行函式宣告＋說明 | 無（只是宣告） |
-| `src/main.cpp` | `opcontrol()` 包成 `#ifdef` / `#else`；`#else` 那段是原本的內容，一個字沒改 | **零行為差** |
+| `src/main.cpp` | ① `opcontrol()` 包成 `#ifdef` / `#else`（`#else` 那段是原本的內容，一個字沒改）② `initialize()` 多登記 `heading_kP/kI/kD` 三顆滑桿 | ①**零行為差** ②**兩版都生效**：多三顆滑桿，不改任何預設值 |
 | `include/Template/arm.h`、`src/Template/arm.cpp` | 加了 `arm_hold_here()`（中止鍵用），**整段包在 `#ifdef PID_TUNE_PROGRAM` 裡** | **零行為差**（正常版根本沒編到這幾行） |
-| `Makefile` | 新增 `tune` target | 無（`.DEFAULT_GOAL` 仍是 `quick`，已驗證 `make` 不帶旗標） |
+| `Makefile` | 新增 `tune` 與 `comp` 兩個 target | 無（`.DEFAULT_GOAL` 仍是 `quick`，已驗證 `make` 不帶旗標） |
 
 **沒有動到**：`Drive::control_arcade()`（正常駕駛面一個字沒改）、`cascade.cpp`／`cascade.h`、
 共用的 `PID` class、`drive.cpp` 的任何一行、`include/vexdash*`／`src/vexdash*` 整包。
@@ -351,6 +409,12 @@ task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vex
 
 ### 6.9 這一節的風險與取捨
 
+- 🔴 **最容易出事的一條：調參完直接 `pros mu --slot 1` 會把調參版燒進比賽 slot。**
+  `tune` 只在進去的時候 clean、出來不會，所以跑完調參版之後 `bin/` 裡每個 `.o` 都帶著
+  `-DPID_TUNE_PROGRAM`，而預設目標 `quick` 不 clean、make 又只看時間戳，於是判定「不用重編」。
+  **回比賽版一定要 `pros make comp`（或先 `pros make clean`）**，燒完開機確認 slot 1
+  的遙控器螢幕沒有 `== PID TUNE ==`。這是這一節唯一會直接害到比賽的坑，請寫進隊上的
+  燒錄 checklist。
 - **一樣沒有上車驗過**，也沒有真的跑過 `pros make`（沒有 ARM toolchain）。做的是主機端語法門
   ＋ Makefile 的 `-n` 乾跑，見下。
 - **調參版沒有限位開關自癒**（見上表）。刻意的：那段邏輯長在 `control_arcade()` 裡面，
@@ -361,10 +425,12 @@ task 會把 stdout 的鎖留在死掉的 task 手上，整條序列埠（含 vex
 - **手臂的 `arm_hold_here()` 是這個 PR 唯一動到 arm 控制器的地方**，而且整段包在
   `#ifdef` 裡。如果你們覺得連 `#ifdef` 都不想要，把它拿掉、中止鍵對手臂就不做事即可
   （手臂的動作本來就是既有 preset，跟正常駕駛按 DOWN 走的是同一條路）。
-- **`pros make tune` 沒有真的跑完過**，只用 GNU Make 4.4.1 做過 `-n` 乾跑，確認：
+- **`heading_kP/kI/kD` 三顆新滑桿在正常版也會出現**（它們掛在 `initialize()`，不在 `#ifdef` 裡）。
+  只是多三顆可以拉的滑桿，預設值完全沒動，不拉就跟以前一樣。
+- **`pros make tune` / `pros make comp` 沒有真的跑完過**，只用 GNU Make 4.4.1 做過 `-n` 乾跑，確認：
   ① `tune` 會先 `clean` 再帶旗標重編；② `-DPID_TUNE_PROGRAM` 確實出現在每一行 `.cpp` 的
-  編譯指令上；③ 不帶 target 的 `make` 預設目標仍是 `quick`、指令列上沒有那個旗標。
-  真正的 ARM 編譯還是要你們跑一次。
+  編譯指令上；③ `comp` 會先 `clean` 再**不帶**旗標重編；④ 不帶 target 的 `make` 預設目標
+  仍是 `quick`、指令列上沒有那個旗標。真正的 ARM 編譯還是要你們跑一次。
 
 ### 6.10 第六節做過的驗證
 

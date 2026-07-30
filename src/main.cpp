@@ -35,6 +35,20 @@ void initialize() {
 	vexdash::watch_config("turn_kI",  &chassis.turn_ki,  "turn/pid");
 	vexdash::watch_config("turn_kD",  &chassis.turn_kd,  "turn/pid");
 
+	// drive_distance() does NOT just run the drive PID -- it runs a SECOND PID
+	// at the same time, the heading loop, which is what keeps the robot pointing
+	// straight while it drives (and what makes an arc when you pass it a heading
+	// that differs from the current one). Without these three sliders you can
+	// tune "how far" but not "how straight", and a drive that veers looks like a
+	// bad drive_kD when it is really an untuned heading_kP.
+	// 中文：drive_distance() 不是只跑直走 PID，它同時跑第二組 heading PID——那才是
+	// 「開直線不歪」的那一組（給它一個跟現在不同的朝向就會變成畫弧）。沒有這三顆
+	// 滑桿，你只調得到「開多遠」、調不到「開多直」；而車子跑歪看起來很像
+	// drive_kD 沒調好，其實是 heading_kP 沒調。
+	vexdash::watch_config("heading_kP", &chassis.heading_kp, "heading/pid");
+	vexdash::watch_config("heading_kI", &chassis.heading_ki, "heading/pid");
+	vexdash::watch_config("heading_kD", &chassis.heading_kd, "heading/pid");
+
 	// --- vexdash: live graph channels (streamed to the web Graph panel) ---
 	vexdash::watch("drive_error",  &chassis.drive_error,       "in");
 	vexdash::watch("drive_target", &chassis.tele_drive_target, "in");
