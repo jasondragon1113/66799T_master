@@ -94,6 +94,17 @@ bool cascade_jog_active(){
 }
 
 void cascade_control_set_enabled(bool enabled){
+  // Waking up: throw away everything the PID remembers. Whatever happened while
+  // the controller was parked (a match pause, an autonomous run that moved the
+  // lift somewhere else) is not error this loop should answer for -- and a
+  // non-zero kI plus a few seconds of stale accumulated error is exactly how a
+  // lift jumps the moment control comes back.
+  // 中文：要重新啟用的時候，把 PID 記得的東西全部丟掉。它被停用期間發生的事（比賽
+  // 暫停、自走把升降開去別的地方）不該算在這一圈頭上；kI 只要不是 0，累了幾秒的
+  // 積分一恢復控制就是一記暴衝。
+  if(enabled && !cascade_enabled){
+    cascade_notify_tare();
+  }
   cascade_enabled = enabled;
 }
 

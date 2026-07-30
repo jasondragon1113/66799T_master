@@ -755,15 +755,42 @@ static bool preset_still_owns(int seq_id){
   return cascade_preset_active && seq_id == preset_sequence_id;
 }
 
+// Give up on the whole preset sequence and hand the cascade back to the driver.
+// The buzz on the controller is the only way the driver finds out -- without it
+// the robot just quietly stops halfway through and looks broken.
+// 中文：整串預設動作放棄，把 cascade 還給駕駛。遙控器震一下是駕駛唯一會知道的方式
+// ——不震的話，機器人只是安靜地停在半路，看起來像壞掉。
+static void preset_abort(){
+  cascade_preset_active = false;
+  // Drive::master is private and this is a free function, so buzz the master
+  // controller through the plain C API -- same controller, no class changes.
+  // 中文：Drive 裡的 master 是 private、這裡又是自由函式，所以改用 C 版 API 讓同一
+  // 支遙控器震動，不用去動類別。
+  pros::c::controller_rumble(pros::E_CONTROLLER_MASTER, "-");
+}
+
 // Wait for the cascade to reach target_deg. Returns false if the sequence was
-// cancelled, so the caller can stop early.
+// cancelled OR if the cascade did not get there in time, so the caller stops.
+//
+// Timing out is NOT "close enough, carry on". The next step of the LEFT
+// sequence lowers the arm to POS_2, which is only safe once the cascade is
+// actually retracted -- running it against a cascade stuck halfway is how the
+// arm and the cascade hit each other. So a timeout aborts the sequence and
+// buzzes the controller instead of pressing on.
+// 中文：等 cascade 到 target_deg。被取消或「等不到」都回 false，呼叫端就會停手。
+// 逾時不等於「差不多了、繼續吧」：LEFT 序列的下一步是把手臂放到 POS_2，那一步只有
+// 在 cascade 真的收回來之後才安全，對著卡在半路的 cascade 放手臂就是兩個機構互撞。
+// 所以逾時＝中止整串動作＋遙控器震一下，不硬做下去。
 static bool cascade_wait_settled(int seq_id, int target_deg){
   int waited_ms = 0;
   while(fabs(cascade_get_position_deg() - target_deg) > CASCADE_SETTLE_ERROR_DEG){
     if(!preset_still_owns(seq_id)) return false;
     delay(10);
     waited_ms += 10;
-    if(waited_ms > PRESET_STEP_TIMEOUT_MS) break;
+    if(waited_ms > PRESET_STEP_TIMEOUT_MS){
+      preset_abort();
+      return false;
+    }
   }
   return preset_still_owns(seq_id);
 }

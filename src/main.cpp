@@ -15,12 +15,24 @@ void initialize() {
 	default_constants();
 
 	// --- vexdash: tunable PID gains (sliders on the web Config panel, auto write-back) ---
-	vexdash::watch_config("kP", &chassis.drive_kp, "drive/pid");
-	vexdash::watch_config("kI", &chassis.drive_ki, "drive/pid");
-	vexdash::watch_config("kD", &chassis.drive_kd, "drive/pid");
-	vexdash::watch_config("kP", &chassis.turn_kp, "turn/pid");
-	vexdash::watch_config("kI", &chassis.turn_ki, "turn/pid");
-	vexdash::watch_config("kD", &chassis.turn_kd, "turn/pid");
+	//
+	// EVERY slider needs a name that is unique across the WHOLE robot, not just
+	// unique inside its group. The registry de-duplicates on the NAME alone --
+	// the group string is only a display path (see watch_registry.h: "same name,
+	// same kind -> the later one overwrites the earlier one"). Four groups all
+	// calling their gain "kP" would collapse into ONE slider wired to whichever
+	// mechanism registered last, and dragging it would silently retune that one
+	// mechanism instead of the one you are looking at.
+	// 中文：每一顆滑桿的名字要在「整台車」是唯一的，不是「在自己那組裡」唯一就好。
+	// 登記表只用名字去重，群組只是顯示路徑（watch_registry.h 白紙黑字寫「同名同類
+	// 後者覆蓋前者」）。四組都叫 "kP" 的話會塌成一顆滑桿、綁到最後登記的那個機構，
+	// 你以為在調底盤，其實在調別的東西——所以下面全部加機構前綴。
+	vexdash::watch_config("drive_kP", &chassis.drive_kp, "drive/pid");
+	vexdash::watch_config("drive_kI", &chassis.drive_ki, "drive/pid");
+	vexdash::watch_config("drive_kD", &chassis.drive_kd, "drive/pid");
+	vexdash::watch_config("turn_kP",  &chassis.turn_kp,  "turn/pid");
+	vexdash::watch_config("turn_kI",  &chassis.turn_ki,  "turn/pid");
+	vexdash::watch_config("turn_kD",  &chassis.turn_kd,  "turn/pid");
 
 	// --- vexdash: live graph channels (streamed to the web Graph panel) ---
 	vexdash::watch("drive_error",  &chassis.drive_error,       "in");
@@ -51,16 +63,16 @@ void initialize() {
 	vexdash::watch_config("POS_1", &ARM_POS_1_DEG, "arm/presets");
 	vexdash::watch_config("POS_2", &ARM_POS_2_DEG, "arm/presets");
 	vexdash::watch_config("POS_3", &ARM_POS_3_DEG, "arm/presets");
-	vexdash::watch_config("kP",    &ARM_KP,        "arm/pid");
-	vexdash::watch_config("kI",    &ARM_KI,        "arm/pid");
-	vexdash::watch_config("kD",    &ARM_KD,        "arm/pid");
-	// Gravity feedforward. kG = the voltage that just holds the arm still when
-	// it is HORIZONTAL; horizontal_deg = the arm_angle reading at that pose.
+	vexdash::watch_config("arm_kP", &ARM_KP,       "arm/pid");
+	vexdash::watch_config("arm_kI", &ARM_KI,       "arm/pid");
+	vexdash::watch_config("arm_kD", &ARM_KD,       "arm/pid");
+	// Gravity feedforward. arm_kG = the voltage that just holds the arm still
+	// when it is HORIZONTAL; arm_horizontal_deg = the arm_angle at that pose.
 	// Both default to 0, which means "feedforward off" -- same as before.
 	// 中文：重力前饋。kG＝手臂放水平時剛好撐住不掉的電壓；horizontal_deg＝那一刻
 	// arm_angle 讀到的角度。兩個都預設 0＝不啟用，跟以前一樣。
-	vexdash::watch_config("kG",    &ARM_KG,        "arm/pid");
-	vexdash::watch_config("horizontal_deg", &ARM_HORIZONTAL_DEG, "arm/pid");
+	vexdash::watch_config("arm_kG", &ARM_KG,       "arm/pid");
+	vexdash::watch_config("arm_horizontal_deg", &ARM_HORIZONTAL_DEG, "arm/pid");
 
 	// --- vexdash: cascade (the lift on ports 7 / -2) live graph + tuning ---
 	// The "cascade/pid" path is the v1.4 CHANNEL_DEF grouping field, so these
@@ -77,10 +89,10 @@ void initialize() {
 	// then kP, then kD, and kI only if it keeps stopping just short.
 	// 中文：調參順序：先 kG（讓升降停在半空中不動的電壓），再 kP，再 kD，每次都差
 	// 一點點才動 kI。
-	vexdash::watch_config("kP", &CASCADE_KP, "cascade/pid");
-	vexdash::watch_config("kI", &CASCADE_KI, "cascade/pid");
-	vexdash::watch_config("kD", &CASCADE_KD, "cascade/pid");
-	vexdash::watch_config("kG", &CASCADE_KG, "cascade/pid");
+	vexdash::watch_config("cascade_kP", &CASCADE_KP, "cascade/pid");
+	vexdash::watch_config("cascade_kI", &CASCADE_KI, "cascade/pid");
+	vexdash::watch_config("cascade_kD", &CASCADE_KD, "cascade/pid");
+	vexdash::watch_config("cascade_kG", &CASCADE_KG, "cascade/pid");
 
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches
@@ -119,6 +131,14 @@ void initialize() {
 }
 
 void disabled() {
+	// Field control has cut the robot off. Park the cascade controller too --
+	// it must not be sitting there piling up integral error against a target it
+	// is not allowed to drive to, or it would dump all of it into the motors the
+	// instant the match resumes.
+	// 中文：場地控制把機器人斷掉了，順手把 cascade 控制器也停掉。不然它會一直對著
+	// 一個「現在不准去」的目標累積積分，等比賽恢復的瞬間全部倒進馬達。
+	cascade_control_set_enabled(false);
+
 	// intake_state = IntakeTask::STOP;
 	delay(1000);
 	inertial.tare_euler(); // idk the difference between this and inertial.tare(). Both works. Does not work if called in competition_initialize() or disabled() for some reason. 
