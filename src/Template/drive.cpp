@@ -287,19 +287,31 @@ void Drive::turn_to_angle(float angle, float extra_angle_deg, float extra_drive_
  * heading it's currently facing. It uses the average of the left and right
  * motor groups to calculate distance driven.
  * 
+ * Passing a heading that differs from the one the robot is currently facing
+ * makes it arc into that heading while it drives, which is how you get a
+ * curved move instead of a turn-then-straight. Combine it with
+ * motion_chaining to exit early (with the drive still powered at
+ * motion_chain_drive_min_voltage) and blend into the next movement.
+ *
  * @param distance Desired distance in inches.
- * @param heading Desired heading in degrees.
+ * @param heading Desired heading in degrees. Defaults to the current heading.
+ * @param motion_chaining Exit early once within motion_chain_drive_early_exit_range.
+ * @param extra_drive_voltage Voltage added to both sides, out of 127.
  */
 
+void Drive::drive_distance(float distance){
+  drive_distance(distance, get_absolute_heading(), false, 0);
+}
+
 void Drive::drive_distance(float distance, bool motion_chaining){
-  drive_distance(distance, 0, motion_chaining, get_absolute_heading());
+  drive_distance(distance, get_absolute_heading(), motion_chaining, 0);
 }
 
-void Drive::drive_distance(float distance, float extra_drive_voltage, bool motion_chaining){
-  drive_distance(distance, extra_drive_voltage, motion_chaining, get_absolute_heading());
+void Drive::drive_distance(float distance, float heading, bool motion_chaining){
+  drive_distance(distance, heading, motion_chaining, 0);
 }
 
-void Drive::drive_distance(float distance, float extra_drive_voltage, bool motion_chaining, float heading){
+void Drive::drive_distance(float distance, float heading, bool motion_chaining, float extra_drive_voltage){
   tele_drive_target = distance; // vexdash telemetry
   PID drivePID(distance, drive_kp, drive_ki, drive_kd, drive_starti, drive_settle_error, drive_settle_time, drive_timeout);
   PID headingPID(reduce_negative_180_to_180(heading - get_absolute_heading()), heading_kp, heading_ki, heading_kd, heading_starti);
@@ -324,7 +336,13 @@ void Drive::drive_distance(float distance, float extra_drive_voltage, bool motio
       drive_output = clamp_min_voltage(drive_output, motion_chain_drive_min_voltage);
     }
 
-    drive_with_voltage(drive_output+heading_output + extra_drive_voltage, drive_output-heading_output + extra_drive_voltage);
+    float left_voltage = drive_output+heading_output + extra_drive_voltage;
+    float right_voltage = drive_output-heading_output + extra_drive_voltage;
+    drive_with_voltage(left_voltage, right_voltage);
+
+    // TEMP DEBUG -- remove once the slow/no-turn issue is diagnosed.
+    printf("heading: %.1f, heading_err: %.1f, drive_out: %.1f, heading_out: %.1f, L: %.1f, R: %.1f\n",
+           get_absolute_heading(), heading_error, drive_output, heading_output, left_voltage, right_voltage);
 
     delay(10);
   }
@@ -397,51 +415,54 @@ float Drive::get_SidewaysTracker_position(){
   return Sideways_tracker.get_position()*SidewaysTracker_in_to_deg_ratio;
 }
 
-// void Drive::wall_distance(WallSide direction, float distance, float heading, float wall_dis_target, float _drive_min_voltage){
-//   PID drivePID(distance, drive_kp, drive_ki, drive_kd, drive_starti, drive_settle_error, drive_settle_time, drive_timeout);
-//   PID headingPID(reduce_negative_180_to_180(heading - get_absolute_heading()), heading_kp, heading_ki, heading_kd, heading_starti);
-//   PID wall_PID(wall_dis_target, wall_kp, wall_ki, wall_kd, wall_starti);
-//   float start_average_position = (get_left_position_in()+get_right_position_in())/2.0;
-//   float average_position = start_average_position;
-  
-//   drivePID.settle_time=10; //
+void Drive::wall_distance(WallSide direction, float distance, float heading, float wall_dis_target, float _drive_min_voltage){
+  PID drivePID(distance, drive_kp, drive_ki, drive_kd, drive_starti, drive_settle_error, drive_settle_time, drive_timeout);
+  PID headingPID(reduce_negative_180_to_180(heading - get_absolute_heading()), heading_kp, heading_ki, heading_kd, heading_starti, turn_settle_error, turn_settle_time, turn_timeout);
+  PID wall_PID(wall_dis_target, wall_kp, wall_ki, wall_kd, wall_starti);
+  float start_average_position = (get_left_position_in()+get_right_position_in())/2.0;
+  float average_position = start_average_position;
 
-//   int rev_constant=1;
-//   if(distance<0) rev_constant =-1;
-//   while(!drivePID.is_settled()){
-//     average_position = (get_left_position_in()+get_right_position_in())/2.0;
-//     drive_error = distance+start_average_position-average_position;
-//     float heading_error = reduce_negative_180_to_180(heading - get_absolute_heading());
-//     float drive_output = drivePID.compute(drive_error);
-//     float heading_output = headingPID.compute(heading_error);
+  drivePID.settle_time=10; //
 
-//     float wall_distance_error = 0;
-//     if(direction == WallSide::LEFT){
-//       wall_distance_error = wall_dis_target - distance_sensorL.get();
-//     } else {
-//       wall_distance_error = wall_dis_target - distance_sensorR.get();
-//     }
+  int rev_constant=1;
+  if(distance<0) rev_constant =-1;
+  // Wait for heading to settle too, not just distance -- otherwise the move
+  // can end right as the wall correction is mid-swing, leaving the robot
+  // still turned away from the target heading.
+  while(!drivePID.is_settled() || !headingPID.is_settled()){
+    average_position = (get_left_position_in()+get_right_position_in())/2.0;
+    drive_error = distance+start_average_position-average_position;
+    float heading_error = reduce_negative_180_to_180(heading - get_absolute_heading());
+    float drive_output = drivePID.compute(drive_error);
+    float heading_output = headingPID.compute(heading_error);
 
-//     // if(fabs(wall_distance_error)>200) wall_distance_error=0;
-//     float wall_dist_output = wall_PID.compute(wall_distance_error);
+    float wall_distance_error = 0;
+    if(direction == WallSide::LEFT){
+      wall_distance_error = wall_dis_target - distance_sensorL.get();
+    } else {
+      wall_distance_error = wall_dis_target - distance_sensorR.get();
+    }
 
-//     if(direction == WallSide::RIGHT){
-//       wall_dist_output = -wall_dist_output;
-//     }
+    // if(fabs(wall_distance_error)>200) wall_distance_error=0;
+    float wall_dist_output = wall_PID.compute(wall_distance_error);
 
-//     drive_output = clamp(drive_output, -drive_max_voltage, drive_max_voltage);
-//     heading_output = clamp(heading_output, -heading_max_voltage, heading_max_voltage);
-//     wall_dist_output = clamp(wall_dist_output, -wall_max_voltage, wall_max_voltage);
+    if(direction == WallSide::RIGHT){
+      wall_dist_output = -wall_dist_output;
+    }
 
-//     clamp_min_voltage(drive_output, _drive_min_voltage);
+    drive_output = clamp(drive_output, -drive_max_voltage, drive_max_voltage);
+    heading_output = clamp(heading_output, -heading_max_voltage, heading_max_voltage);
+    wall_dist_output = clamp(wall_dist_output, -wall_max_voltage, wall_max_voltage);
 
-//     drive_with_voltage(left_voltage_scaling(drive_output, heading_output+wall_dist_output*rev_constant), right_voltage_scaling(drive_output, heading_output+wall_dist_output*rev_constant));    
-//     // drive_with_voltage(drive_output+heading_output+wall_dist_output*rev_constant, drive_output-heading_output-wall_dist_output*rev_constant);
-//     delay(10);
-//   }
-//   // drive_settle_time=150;
-//   // drive_max_voltage=drive_min_voltage;
-// }
+    clamp_min_voltage(drive_output, _drive_min_voltage);
+
+    drive_with_voltage(left_voltage_scaling(drive_output, heading_output+wall_dist_output*rev_constant), right_voltage_scaling(drive_output, heading_output+wall_dist_output*rev_constant));
+    // drive_with_voltage(drive_output+heading_output+wall_dist_output*rev_constant, drive_output-heading_output-wall_dist_output*rev_constant);
+    delay(10);
+  }
+  // drive_settle_time=150;
+  // drive_max_voltage=drive_min_voltage;
+}
 
 /**
  * Background task for updating the odometry.
@@ -484,7 +505,7 @@ void Drive::set_coordinates(float X_position, float Y_position, float orientatio
   set_heading(orientation_deg);
 
   if (odom_task != nullptr) { // is this if() even necessary
-    odom_task->suspend();   // stop task
+    odom_task->suspend();    // stop task
     delete odom_task;      // free memory
   }
   odom_task = new Task(position_track_task);
@@ -702,10 +723,65 @@ const int CASCADE_EXTEND_LIMIT_DEG = 3900;
 
 // RIGHT/LEFT button cascade targets (paired with the arm going to POS_1/POS_2
 // respectively). Change these values to retarget.
-int CASCADE_PRESET_DEG = 312;       // RIGHT -> ArmPosition::POS_1, first cascade move
-int CASCADE_PRESET_2_DEG = 512;     // LEFT  -> ArmPosition::POS_2
-int CASCADE_RIGHT_FINAL_DEG = 300;  // RIGHT -> cascade's 2nd move, once the arm settles
+int CASCADE_PRESET_DEG = 545;       // RIGHT -> ArmPosition::POS_1, first cascade move
+int CASCADE_PRESET_2_DEG = 595;     // LEFT  -> ArmPosition::POS_3, first cascade move
+int CASCADE_RIGHT_FINAL_DEG = 250;  // RIGHT -> cascade's 2nd move, once the arm settles
+int CASCADE_LEFT_FINAL_DEG = 0;     // LEFT  -> cascade's 2nd move, once the arm reaches POS_3
 const int CASCADE_MOVE_VELOCITY = 117; // move_absolute() speed, out of 200 rpm
+
+// Waiting on cascade/arm move_absolute() inside a preset sequence: max error to
+// count as "arrived", and how long to wait before giving up and moving on.
+const int CASCADE_SETTLE_ERROR_DEG = 20;
+const int PRESET_STEP_TIMEOUT_MS = 3000;
+// arm_settled is recomputed by arm_task() every 10ms, so it stays stale (true
+// for the *previous* target) briefly after arm_set_position() -- wait this long
+// before trusting it.
+const int ARM_SETTLE_LATENCY_MS = 30;
+
+// True while a RIGHT/LEFT preset sequence owns the cascade. Cleared as soon as
+// the driver takes manual control with L1/L2, which also tells a running
+// sequence task to abort instead of fighting the driver. File scope (not local
+// to control_arcade) so those tasks can see it.
+static bool cascade_preset_active = false;
+
+// Bumped every time something new takes over the arm: another preset press, or
+// DOWN. A running sequence task holds the id it started with and gives up as
+// soon as it's been superseded, so a later button press can't be undone by an
+// older sequence still working through its steps.
+static int preset_sequence_id = 0;
+
+// A sequence keeps going only while it still owns the cascade (driver hasn't
+// grabbed L1/L2) and hasn't been superseded by a newer press.
+static bool preset_still_owns(int seq_id){
+  return cascade_preset_active && seq_id == preset_sequence_id;
+}
+
+// Wait for the cascade to reach target_deg. Returns false if the sequence was
+// cancelled, so the caller can stop early.
+static bool cascade_wait_settled(int seq_id, int target_deg){
+  int waited_ms = 0;
+  while(fabs(cascade1.get_position() - target_deg) > CASCADE_SETTLE_ERROR_DEG){
+    if(!preset_still_owns(seq_id)) return false;
+    delay(10);
+    waited_ms += 10;
+    if(waited_ms > PRESET_STEP_TIMEOUT_MS) break;
+  }
+  return preset_still_owns(seq_id);
+}
+
+// Wait for the arm to reach whatever target was last set with
+// arm_set_position(). Same cancellation contract as cascade_wait_settled().
+static bool arm_wait_settled(int seq_id){
+  delay(ARM_SETTLE_LATENCY_MS);
+  int waited_ms = 0;
+  while(!arm_settled){
+    if(!preset_still_owns(seq_id)) return false;
+    delay(10);
+    waited_ms += 10;
+    if(waited_ms > PRESET_STEP_TIMEOUT_MS) break;
+  }
+  return preset_still_owns(seq_id);
+}
 
 /**
  * Controls a chassis with left stick throttle and right stick turning.
@@ -726,7 +802,7 @@ void Drive::control_arcade(){
   bool bt_down=false , last_bt_down=false, bumper_bt_down=false;
   bool bt_Left=false , last_bt_Left=false;
   bool outtake_wait = false;
-  bool cascade_preset_active = false;
+  cascade_preset_active = false;
   // Task in_fxn(intake_status);
   chassis.drive_stop(MotorBrake::coast);
 
@@ -802,12 +878,22 @@ void Drive::control_arcade(){
     //   }
 
     //bt
-    // claw1.set_value(bt_a);
+    // claw.set_value(bt_a);
     // last_bt_a = bt_a;
 
-    claw1.set_value(bumper_bt_a);
-    claw2.set_value(bumper_bt_b);
+    claw.set_value(bumper_bt_b);
     toggle.set_value(bumper_bt_x);
+
+    // Cascade limit switch: this one reads 1 when pressed, 0 when not
+    // pressed. Every time it's triggered, re-zero both cascade encoders
+    // so the physical hard stop is always "0 degrees" -- this corrects any
+    // encoder drift picked up over the match, and the existing L2 (retract)
+    // check below (cascade1.get_position() <= 0) will now also stop the
+    // motors right at the switch instead of relying on drifted encoder math.
+    if(cascade_limit.get_value() == 1){
+      cascade1.tare_position();
+      cascade2.tare_position();
+    }
 
     //intake
     if(master.get_digital(DIGITAL_R1)){
@@ -849,16 +935,15 @@ void Drive::control_arcade(){
     bt_Right = master.get_digital(DIGITAL_RIGHT);
     if(bt_Right and !last_bt_Right){
       cascade_preset_active = true;
+      int right_seq_id = ++preset_sequence_id;
       cascade1.move_absolute(CASCADE_PRESET_DEG, CASCADE_MOVE_VELOCITY);
       cascade2.move_absolute(CASCADE_PRESET_DEG, CASCADE_MOVE_VELOCITY);
       arm_set_position(ArmPosition::POS_1);
-      claw2.set_value(false);
+      claw.set_value(false);
       // Runs on its own task so waiting for the arm doesn't block the rest
       // of control_arcade() (drive, intake, other buttons).
-      pros::Task([]{
-        while(!arm_settled){
-          pros::delay(10);
-        }
+      pros::Task([right_seq_id]{
+        if(!arm_wait_settled(right_seq_id)) return;
         cascade1.move_absolute(CASCADE_RIGHT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
         cascade2.move_absolute(CASCADE_RIGHT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
       });
@@ -867,20 +952,41 @@ void Drive::control_arcade(){
 
     bt_down = master.get_digital(DIGITAL_DOWN);
     if(bt_down and !last_bt_down){
+      // Cancels any preset sequence still stepping through its moves, so it
+      // can't send the arm back up after this. The cascade keeps holding
+      // wherever it is; only the arm comes down.
+      ++preset_sequence_id;
       arm_set_position(ArmPosition::DOWN);
     }
     last_bt_down = bt_down;
 
     bt_Left = master.get_digital(DIGITAL_LEFT);
     if(bt_Left and !last_bt_Left){
-      arm_set_position(ArmPosition::POS_2);
       cascade_preset_active = true;
-      // Runs on its own task so the 500ms wait doesn't block the rest of
-      // control_arcade() (drive, intake, other buttons).
-      pros::Task([]{
-        pros::delay(500);
-        cascade1.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
-        cascade2.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
+      int left_seq_id = ++preset_sequence_id;
+      cascade1.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
+      cascade2.move_absolute(CASCADE_PRESET_2_DEG, CASCADE_MOVE_VELOCITY);
+      // Run on its own task so the waits between steps don't block the rest
+      // of control_arcade() (drive, intake, other buttons). Each wait bails
+      // out if the driver takes the cascade back over with L1/L2, or presses
+      // DOWN / another preset.
+      pros::Task([left_seq_id]{
+        // 1. cascade is already heading to CASCADE_PRESET_2_DEG; give it 100ms
+        //    to start moving, then 2. raise the arm to POS_3.
+        pros::delay(100);
+        if(!preset_still_owns(left_seq_id)) return;
+        arm_set_position(ArmPosition::POS_3);
+        if(!arm_wait_settled(left_seq_id)) return;
+
+        // 3. retract the cascade all the way back to CASCADE_LEFT_FINAL_DEG.
+        cascade1.move_absolute(CASCADE_LEFT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
+        cascade2.move_absolute(CASCADE_LEFT_FINAL_DEG, CASCADE_MOVE_VELOCITY);
+        if(!cascade_wait_settled(left_seq_id, CASCADE_LEFT_FINAL_DEG)) return;
+
+        // 4. rotate the arm down to POS_2, cascade holds where it is --
+        //    move_absolute() keeps it there, and cascade_preset_active stays
+        //    true so the main loop won't zero its voltage.
+        arm_set_position(ArmPosition::POS_2);
       });
     }
     last_bt_Left = bt_Left;

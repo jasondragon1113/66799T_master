@@ -30,6 +30,23 @@ void initialize() {
 	vexdash::watch("turn_target",  &chassis.tele_turn_target,  "deg");
 	vexdash::watch("turn_output",  &chassis.tele_turn_output,  "V");
 
+	// --- vexdash: arm angle from the rotation sensor (use arm_angle to measure
+	// the real ARM_POS_*_DEG values -- see arm.cpp) ---
+	vexdash::watch("arm_angle",   &tele_arm_angle,  "deg");
+	vexdash::watch("arm_target",  &tele_arm_target, "deg");
+	vexdash::watch("arm_error",   &tele_arm_error,  "deg");
+	vexdash::watch("arm_output",  &tele_arm_output, "V");
+	vexdash::watch("arm_sensor_ok", &arm_sensor_ok);
+
+	// --- vexdash: live arm tuning (sliders on the Config panel, auto write-back) ---
+	vexdash::watch_config("DOWN",  &ARM_DOWN_DEG,  "arm/presets");
+	vexdash::watch_config("POS_1", &ARM_POS_1_DEG, "arm/presets");
+	vexdash::watch_config("POS_2", &ARM_POS_2_DEG, "arm/presets");
+	vexdash::watch_config("POS_3", &ARM_POS_3_DEG, "arm/presets");
+	vexdash::watch_config("kP",    &ARM_KP,        "arm/pid");
+	vexdash::watch_config("kI",    &ARM_KI,        "arm/pid");
+	vexdash::watch_config("kD",    &ARM_KD,        "arm/pid");
+
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches
 	vexdash::watch_config("run_drive",     &run_drive_test, "drive/test"); // toggle ON to drive
@@ -42,6 +59,7 @@ void initialize() {
 	// --- vexdash: Device Map -- sensors section ---
 	vexdash::declare_device(distance_sensorL.get_port(), vexdash::DeviceType::kDistance, "distance_L");
 	vexdash::declare_device(distance_sensorR.get_port(), vexdash::DeviceType::kDistance, "distance_R");
+	vexdash::declare_device(arm_rotation.get_port(), vexdash::DeviceType::kRotation, "arm_rotation");
 
 	// --- vexdash: Device Map -- motors section ---
 	vexdash::declare_device(arm.get_port(), vexdash::DeviceType::kMotor, "arm");
@@ -69,7 +87,8 @@ void disabled() {
 
 void competition_initialize() {
 	init();
-
+	toggle.set_value(false);
+	claw.set_value(true);
 	delay(2250);
 	inertial.tare_euler(); // idk the difference between this and inertial.tare(). Both works. Does not work if called in competition_initialize() or disabled() for some reason.
 }
@@ -78,6 +97,14 @@ ASSET(curveLeft_txt);
 
 void autonomous() {
 	chassis.set_coordinates(0, 0, 0);
+
+	// Cascade encoder "0" is only tared in Drive::control_arcade() (teleop),
+	// so without this, ScoringLevel::LEVEL_0 in auton would target whatever
+	// position the encoder happened to read at power-on -- not the true
+	// physical bottom the robot is placed at before a match.
+	cascade1.tare_position();
+	cascade2.tare_position();
+
 	//route: whichever is selected on the dashboard's Auton Select tab
 	switch (selected_auton) {
 		case AutonRoutine::left:

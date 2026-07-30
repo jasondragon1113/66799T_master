@@ -17,16 +17,17 @@ MotorGroup leftMotors({leftFront.get_port(), leftMiddle.get_port(), leftBack.get
 MotorGroup rightMotors({rightFront.get_port(), rightMiddle.get_port(), rightBack.get_port()});
 
 Motor intake(-5, MotorGears::green);
-Motor cascade1(-7, MotorGears::green);
-Motor cascade2(2, MotorGears::green);
+Motor cascade1(7, MotorGears::green);
+Motor cascade2(-2, MotorGears::green);
 Motor arm(18, MotorGears::green);
 
-adi::DigitalOut claw1('H');
-adi::DigitalOut claw2('G');
+adi::DigitalOut claw('G');
 adi::DigitalOut toggle('F');
+adi::DigitalIn cascade_limit('D');
 
 Distance distance_sensorL(4);
 Distance distance_sensorR(20);
+Rotation arm_rotation(21);
 
 
 
@@ -85,11 +86,11 @@ Drive chassis(
 
 void default_constants(){
     // Each constant set is in the form of (maxVoltage, kP, kI, kD, startI(, minVoltage)).
-    chassis.set_drive_constants(127, 6.5, 0, 21.167, 0, 0);
-    chassis.set_heading_constants(64, 0.4, 0, 20, 0); 
-    chassis.set_turn_constants(107, 3.2, .10583, 17.4625, 15.0);
+    chassis.set_drive_constants(127, 7, 0, 12.5, 0, 0);
+    chassis.set_heading_constants(64, 1.5, 0, 8, 0); //chassis.set_heading_constants(64, 0.4, 0, 20, 0);      chassis.set_heading_constants(64, 1, 0, 2, 0);
+    chassis.set_turn_constants(107, 3.2, .10583, 17.4625, 15.0); //chassis.set_turn_constants(107, 3.2, .10583, 17.4625, 15.0);
     chassis.set_swing_constants(127, 3.704166667, 0.08466667, 21.1666667, 15);
-    chassis.set_wall_constants(127, 0.529166667, 0, 0, 0);
+    chassis.set_wall_constants(74, 0.065, 0, 0, 0); //chassis.set_wall_constants(127, 0.529166667, 0, 0, 0);
     
     // Each exit condition set is in the form of (settle_error, settle_time, timeout).
     chassis.set_drive_exit_conditions(1.875, 45, 3000);

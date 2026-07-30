@@ -385,34 +385,43 @@ void dashboard_draw_motors_tab(){
 
   // Distance sensors L/R, same row as IMU status.
   char dist_buf[16];
+  const int DIST_X_SHIFT = 60;    // pulls the whole L/R block left, away from the calibrate button
+  const int DIST_BLOCK_W = 90;    // wide enough to fully clear "L 9999mm" so no stale digits linger
+  const int DIST_RL_GAP = 15;     // gap between the L and R blocks
+  const int DIST_DOT_OFFSET = 10; // dot sits this far left of its block's text
+
+  int dist_l_x0 = 200 - DIST_X_SHIFT;
+  int dist_l_x1 = dist_l_x0 + DIST_BLOCK_W;
+  int dist_r_x0 = dist_l_x1 + DIST_RL_GAP;
+  int dist_r_x1 = dist_r_x0 + DIST_BLOCK_W;
 
   screen::set_pen(COLOR_BG);
   screen::set_eraser(COLOR_BG);
-  screen::fill_rect(200, IMU_ROW_Y, 260, IMU_ROW_Y + row_h - 2);
+  screen::fill_rect(dist_l_x0, IMU_ROW_Y, dist_l_x1, IMU_ROW_Y + row_h - 2);
   bool dist_l_installed = distance_sensorL.is_installed();
   screen::set_pen(dist_l_installed ? pros::c::COLOR_GREEN : pros::c::COLOR_RED);
-  screen::fill_circle(190, IMU_ROW_Y + 8, 5);
+  screen::fill_circle(dist_l_x0 - DIST_DOT_OFFSET, IMU_ROW_Y + 8, 5);
   screen::set_pen(COLOR_TEXT);
   if(dist_l_installed){
     snprintf(dist_buf, sizeof(dist_buf), "L %dmm", (int)distance_sensorL.get());
   } else {
     snprintf(dist_buf, sizeof(dist_buf), "L NA");
   }
-  screen::print(TEXT_MEDIUM, 200, IMU_ROW_Y, "%s", dist_buf);
+  screen::print(TEXT_MEDIUM, dist_l_x0, IMU_ROW_Y, "%s", dist_buf);
 
   screen::set_pen(COLOR_BG);
   screen::set_eraser(COLOR_BG);
-  screen::fill_rect(275, IMU_ROW_Y, 335, IMU_ROW_Y + row_h - 2);
+  screen::fill_rect(dist_r_x0, IMU_ROW_Y, dist_r_x1, IMU_ROW_Y + row_h - 2);
   bool dist_r_installed = distance_sensorR.is_installed();
   screen::set_pen(dist_r_installed ? pros::c::COLOR_GREEN : pros::c::COLOR_RED);
-  screen::fill_circle(265, IMU_ROW_Y + 8, 5);
+  screen::fill_circle(dist_r_x0 - DIST_DOT_OFFSET, IMU_ROW_Y + 8, 5);
   screen::set_pen(COLOR_TEXT);
   if(dist_r_installed){
     snprintf(dist_buf, sizeof(dist_buf), "R %dmm", (int)distance_sensorR.get());
   } else {
     snprintf(dist_buf, sizeof(dist_buf), "R NA");
   }
-  screen::print(TEXT_MEDIUM, 275, IMU_ROW_Y, "%s", dist_buf);
+  screen::print(TEXT_MEDIUM, dist_r_x0, IMU_ROW_Y, "%s", dist_buf);
 
   // Button to (re)initialize/calibrate the IMU. Interior is cleared first --
   // draw_rounded_rect_outline only paints the border, so without this a

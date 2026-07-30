@@ -24,12 +24,13 @@ extern Motor cascade1;
 extern Motor cascade2;
 extern Motor arm;
 
-extern adi::DigitalOut claw1;
-extern adi::DigitalOut claw2;
+extern adi::DigitalOut claw;
 extern adi::DigitalOut toggle;
+extern adi::DigitalIn cascade_limit;
 
 extern Distance distance_sensorL;
 extern Distance distance_sensorR;
+extern Rotation arm_rotation;
 
 extern lemlib::Drivetrain drivetrain;
 extern lemlib::OdomSensors sensors;

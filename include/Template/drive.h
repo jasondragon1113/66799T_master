@@ -132,9 +132,15 @@ class Drive{
         void turn_to_angle(float angle, float extra_angle_deg, bool motion_chaining = false);
         void turn_to_angle(float angle, float extra_angle_deg, float extra_drive_voltage, bool motion_chaining = false);
 
-        void drive_distance(float distance, bool motion_chaining = false);
-        void drive_distance(float distance, float extra_drive_voltage, bool motion_chaining = false);
-        void drive_distance(float distance, float extra_drive_voltage, bool motion_chaining, float heading);
+        // Overloads are deliberately shaped so a 2-arg call is always
+        // (distance, motion_chaining) and a 3-arg call is always
+        // (distance, heading, motion_chaining). motion_chaining has no default
+        // on the heading overloads -- giving it one makes drive_distance(5, 87)
+        // ambiguous between "87 volts of heading" and "87 == true".
+        void drive_distance(float distance);
+        void drive_distance(float distance, bool motion_chaining);
+        void drive_distance(float distance, float heading, bool motion_chaining);
+        void drive_distance(float distance, float heading, bool motion_chaining, float extra_drive_voltage);
 
         void swing_to_angle(float angle, bool move_left, bool motion_chaining = false);
         
@@ -153,7 +159,7 @@ class Drive{
         static int position_track_task();
         // vex::task odom_task;
         Task* odom_task = nullptr;
-        float get_X_position();
+        float get_X_position(); 
         float get_Y_position();
 
         // void drive_stop(vex::brakeType mode);
