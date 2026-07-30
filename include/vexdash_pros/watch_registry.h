@@ -38,6 +38,16 @@
 
 namespace vexdash {
 
+// Yield hook for declare_all()'s burst throttle (see declare_all() doc
+// below for the WHY). Default nullptr = no throttling, i.e. the exact old
+// behaviour -- fully backward compatible and host-testable, matching the
+// PumpConfig callback pattern (RegisterCallback/SampleCallback) elsewhere in
+// this lib.
+// 中文：declare_all() burst 節流用的讓步鉤子（原因見 declare_all() 註解）。
+// 預設 nullptr＝不節流，即完全維持舊行為——與 PumpConfig 的
+// RegisterCallback/SampleCallback 同款設計，向下相容、host 可測。
+using YieldCallback = void (*)(void* user_data);
+
 // 指標所指的 C 型別（決定怎麼讀寫指標；wire 上的 ValueType 由此推導）。
 enum class WatchScalar : std::uint8_t {
   kF64,   // double*   -> wire kF64
@@ -90,7 +100,27 @@ class WatchRegistry {
   // 走訪登記表逐一 declare_*（telemetry -> declare_channel_ex，config ->
   // declare_f64/i32/bool + set_callback）。天生 idempotent：可安全在啟動、每次
   // 重連、每次週期自癒重送時重複呼叫（正是 pump 的 on_register 契約要的）。
-  void declare_all(Session& session);
+  //
+  // Burst throttle (second layer of defense alongside the transport-level
+  // bounded_retry_write, see bounded_write.h): a robot with many watch()
+  // calls emits one CHANNEL_DEF/CONFIG_SCHEMA frame per entry, ALL in this
+  // one synchronous loop -- up to kMaxWatches(64) frames back-to-back with no
+  // gap at all. That is exactly the ~1.5KB link-up registration burst that
+  // overwhelms the Smart Port TX FIFO faster than it drains. When `yield` is
+  // non-null, this loop calls it every `yield_every` declared frames (a
+  // scheduler tick / pros::delay(1) on PROS) so the FIFO gets a chance to
+  // drain mid-burst instead of piling the whole registry's frames up at
+  // once. Default nullptr/yield_every -> unchanged behaviour (no throttling,
+  // existing tests and callers are unaffected).
+  // 中文：burst 節流（跟 transport 層的 bounded_retry_write 是雙層保險，見
+  // bounded_write.h）：watch() 項目多的機器人一次 declare_all() 會在同一個同步
+  // 迴圈裡連續送出最多 kMaxWatches(64) 個 CHANNEL_DEF/CONFIG_SCHEMA 幀、中間完
+  // 全沒有間隔——這正是塞爆 Smart Port TX FIFO 的 ~1.5KB link-up 註冊 burst 本
+  // 尊。`yield` 非 null 時，每宣告 `yield_every` 幀就呼叫一次（PROS 上接
+  // pros::delay(1)），讓 FIFO 在 burst 中途有機會排空。預設 nullptr／
+  // yield_every 不節流＝完全維持舊行為，既有測試與呼叫端零影響。
+  void declare_all(Session& session, YieldCallback yield = nullptr, void* yield_user_data = nullptr,
+                    std::size_t yield_every = 5);
 
   // flush 前取樣：把每個 telemetry 登記項的目前值讀出並 put() 進 telemetry。
   // 尚未 declare_all()（或 declare 失敗）的項目其 channel id 無效，會被跳過。

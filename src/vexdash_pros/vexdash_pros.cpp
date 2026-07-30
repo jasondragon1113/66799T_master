@@ -119,12 +119,24 @@ std::uint8_t read_device_values(std::uint8_t wire_port, DeviceType observed_type
   }
 }
 
+// declare_all()'s throttle hook: pros::delay(1) every kRegistrationYieldEvery
+// declared frames, so the link-up registration burst gets a chance to drain
+// the Smart Port TX FIFO mid-burst (second layer of defense alongside the
+// transport-level bounded_retry_write -- see bounded_write.h and
+// watch_registry.h's declare_all() doc comment).
+// 中文：declare_all() 的節流鉤子：每 kRegistrationYieldEvery 幀 pros::delay(1)，
+// 讓 link-up 註冊 burst 中途有機會排空 Smart Port TX FIFO（跟 transport 層的
+// bounded_retry_write 是雙層保險，見 bounded_write.h 與 watch_registry.h 的
+// declare_all() 註解）。
+constexpr std::size_t kRegistrationYieldEvery = 5;
+void registration_yield(void*) { pros::delay(1); }
+
 // 內建的 idempotent 註冊回呼：on_register==nullptr 時 init_* 改用它（見 finish_init）。
 // 除了走訪 watch 登記表宣告頻道外，順手掃一次埠、把當前埠地圖「無條件」整批送出——
 // 開機/重連/週期自癒都會經過這裡，無條件重送＝DEVICE_MAP 的掉幀自癒（跟 CHANNEL_DEF
 // 同款週期重送策略），確保初始快照就算掉一幀也會在下個自癒週期補回。
 void default_register(Session& s, void*) {
-  g_registry.declare_all(s);
+  g_registry.declare_all(s, &registration_yield, nullptr, kRegistrationYieldEvery);
   g_command_registry.declare_all(s);
   if (g_device_scan_enabled) {
     g_device_scanner.scan(&read_plugged, nullptr);

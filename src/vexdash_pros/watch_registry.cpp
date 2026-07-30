@@ -218,7 +218,9 @@ void WatchRegistry::on_config_set(ConfigId, const std::uint8_t* value_bytes, voi
 
 // ---- declare_all（idempotent 註冊回呼的本體）-------------------------------
 
-void WatchRegistry::declare_all(Session& session) {
+void WatchRegistry::declare_all(Session& session, YieldCallback yield, void* yield_user_data,
+                                 std::size_t yield_every) {
+  std::size_t frames_since_yield = 0;
   for (std::size_t i = 0; i < count_; ++i) {
     Entry& e = entries_[i];
     // 防護與 sample_all 一致：指標式項目若 ptr 為 null 直接跳過（入口已擋掉 null，
@@ -258,6 +260,18 @@ void WatchRegistry::declare_all(Session& session) {
       // is_fn 一律 f64（取樣函式回傳 double）；指標式依 scalar 推導 wire 型別。
       ValueType vt = e.is_fn ? ValueType::kF64 : wire_type(e.scalar);
       e.ch_id = session.telemetry().declare_channel_ex(e.name, vt, e.group_or_unit, opt);
+    }
+
+    // Burst throttle (see declare_all() doc comment for the WHY): give the
+    // FIFO a chance to drain every `yield_every` frames instead of firing
+    // the whole registry's worth of frames with zero gaps.
+    // 中文：burst 節流（原因見 declare_all() 上方註解）：每 `yield_every` 幀就
+    // 讓 FIFO 有機會排空一次，而不是把整張登記表的幀一口氣、零間隔全部打出去。
+    if (yield != nullptr && yield_every > 0) {
+      if (++frames_since_yield >= yield_every) {
+        yield(yield_user_data);
+        frames_since_yield = 0;
+      }
     }
   }
 }
