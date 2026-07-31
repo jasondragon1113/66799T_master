@@ -109,6 +109,16 @@ class Session {
   void handle_pong(const std::uint8_t* payload, std::size_t len);
 
   ITransport& transport_;
+
+ public:
+  // Transport clock, for callers that need a time reading DURING a call
+  // rather than the one they were handed on entry (ConnectionPump uses it
+  // to restart the resend period after a paced registration finishes).
+  // 中文：transport 的時鐘。給那些需要在「呼叫進行中」重新讀時間的呼叫端用
+  // （pump 用它在涓流式註冊送完之後，從結束的時間點重新起算重送週期）。
+  std::uint64_t transport_millis() { return transport_.millis(); }
+
+ private:
   Role role_;
 
   Telemetry telemetry_;

@@ -410,6 +410,30 @@ void initialize() {
 	// dashboard 調參時的資料流節奏一致。
 	vexdash::PumpConfig pump_cfg;
 	pump_cfg.telemetry_period_ms = 25;
+	// registration_pace_bytes / registration_pace_window_ms keep their defaults
+	// (320 B per 10 ms) = the registration TRICKLE. What it fixes is documented
+	// on PumpConfig in connection_pump.h; the arithmetic below is THIS robot's,
+	// recomputed from its own registry, not 66994V's:
+	//   * registry = 83 entries in the tuning build (74 in the competition one),
+	//     one definition frame each at ~68 B on the wire = ~5.6 KB per burst,
+	//     sent on link-up AND again every registration_resend_period_ms.
+	//   * steady-state telemetry = 34 channels x ~10 B + framing = ~350 B per
+	//     flush, which at the 25 ms period above is ~14 KB/s.
+	//   * the bucket is shared, so registration gets 32 - 14 = ~18 KB/s of the
+	//     320 B/10 ms budget: ~5.6 KB / 18 KB/s = ~0.31 s to place the whole
+	//     registry -- an order of magnitude inside link_timeout_ms (3000 ms),
+	//     with the paced_stall PING every 500 ms as the backstop if a burst
+	//     ever ran long.
+	// 中文：registration_pace_bytes／window_ms 沿用預設（每 10ms 320 bytes），也就是
+	// 註冊涓流。它在修什麼看 connection_pump.h 裡 PumpConfig 那段；下面這筆帳是**這台車
+	// 自己**的登記量重算的，不是 66994V 的：
+	//   * 登記表＝調參版 83 筆（比賽版 74 筆），每筆一個定義幀、線上約 68 bytes＝一輪
+	//     約 5.6KB；開機首次註冊與之後每個 registration_resend_period_ms 各送一輪。
+	//   * 穩態遙測＝34 條頻道 × 約 10 bytes ＋封包框架 ≒ 每次 flush 約 350 bytes，
+	//     以上面 25ms 的週期算約 14KB/s。
+	//   * 桶是共用的，所以註冊分到 32−14＝約 18KB/s：5.6KB ÷ 18KB/s ≒ 0.31 秒送完整份
+	//     登記表——比 link_timeout_ms（3000ms）小一個數量級；萬一某一輪拖長，還有
+	//     paced_stall 每 500ms 的 PING 接住。
 
 #define VEXDASH_OVER_USB 0
 #if VEXDASH_OVER_USB

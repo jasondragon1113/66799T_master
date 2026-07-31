@@ -101,6 +101,76 @@ struct PumpConfig {
   // CHANNEL_DEF（沿用 tick() 第 6 點的自癒機制），但把突發頻率降到 2.5 分之一。
   std::uint32_t registration_resend_period_ms = 5000;
 
+  // ---- registration trickle -------------------------------------------
+  //
+  // MEASURED SYMPTOM this fixes (2026-07-31, 66994V, robot stationary): the
+  // dashboard's link quality score fell to 24 on a regular ~5 second beat with
+  // nothing moving. 5 s is registration_resend_period_ms above, and the resend
+  // replays the entire registry in one synchronous burst -- ~120 frames / ~8 KB
+  // back to back after the tables were raised to 96 entries. The Brain's Smart
+  // Port FIFO keeps up; the ESP32 bridge on the far end does not, and once its
+  // receive buffer overruns the rest of the burst is lost mid-COBS-frame. The
+  // link never drops, it just shreds a packet every burst, forever.
+  //
+  // bounded_retry_write() cannot help: it flow-controls against the LOCAL FIFO,
+  // which drains fine. The far end has no back-pressure channel, so the only
+  // remedy is to not exceed what it can absorb -- hence a token bucket over the
+  // registration burst only (link-up AND periodic resend). Live telemetry sent
+  // during a trickle is charged to the same bucket (see SIZING below).
+  //
+  // SIZING, and why it is not smaller. The bucket is shared: live telemetry
+  // sent from the stall hook is charged to it too (smartport_transport.h), and
+  // steady-state telemetry on this robot is ~14 KB/s. At the first-cut 160 B /
+  // 10 ms (16 KB/s total) that left registration only ~2 KB/s, stretching one
+  // burst to ~2.8 s -- and the pump is inside pace_gate()'s delay(1) loop for
+  // that whole time, sending no PING and polling no RX. link_timeout_ms is
+  // 3000, so a burst was finishing within a few hundred ms of tripping the
+  // link-down timer: any jitter and the link would drop, reconnect, and
+  // re-register, which is a worse oscillation than the one being fixed.
+  //
+  // 320 B / 10 ms = 32 KB/s total: ~14 KB/s telemetry + ~18 KB/s registration,
+  // so an ~8 KB registry lands in ~0.45 s (8 KB / 18.2 KB/s -- the registry
+  // only gets the registration share, not the total). That is a sub-half-second
+  // sprint rather than a 2.8 s crawl -- an order of magnitude clear of the 3 s
+  // link timeout, while still an order of magnitude below the ~92 KB/s
+  // gap-free blast that overran the ESP32 to begin with. A short sprint it can
+  // absorb; a sustained flood it cannot.
+  //
+  // Belt and braces: the stall hook also emits a PING every ~500 ms during a
+  // trickle (vexdash_pros.cpp paced_stall), so the link-down timer cannot
+  // expire mid-burst even if the burst somehow ran long.
+  //
+  // Set registration_pace_bytes to 0 to disable the trickle entirely.
+  //
+  // 中文：**為什麼不能再調小。** 這個桶是共用的——stall 鉤子送出的即時遙測也要記帳
+  // （見 smartport_transport.h），而本車穩態遙測約 14KB/s。第一版的 160B/10ms（總共
+  // 16KB/s）等於只留給註冊約 2KB/s，一輪要拖到約 2.8 秒；而那整段時間 pump 都卡在
+  // pace_gate() 的 delay(1) 迴圈裡，不送 PING、不收封包。link_timeout_ms 是 3000ms，
+  // 等於一輪結束時距離「判定斷線」只剩幾百毫秒——稍微抖一下就會 DOWN→UP→重新註冊，
+  // 那個震盪比原本要修的問題更糟。
+  // 改成 320B/10ms ＝總共 32KB/s：遙測約 14＋註冊約 18，約 8KB 的登記表約 0.45 秒送完
+  // （8KB ÷ 註冊分到的 18.2KB/s——登記表只吃得到註冊那一份，不是總速率）。
+  // 變成「半秒內的短衝刺」而不是「2.8 秒的慢爬」，離 3 秒門檻差一個數量級，
+  // 同時仍遠低於原本那個約 92KB/s、完全沒有間隔的爆發——短促衝刺 ESP32 吃得下，
+  // 持續灌爆它吃不下。
+  // 另加一道保險：涓流期間 stall 鉤子每約 500ms 會補送一次 PING
+  // （vexdash_pros.cpp 的 paced_stall），就算某一輪真的拖長了，斷線計時也不會到期。
+  //
+  // 中文：**這兩個參數修的是一個實測到的症狀**（2026-07-31，66994V，車子完全靜止）：
+  // dashboard 的連線品質分數每隔約 5 秒規律掉到 24。5 秒正是上面的
+  // registration_resend_period_ms，而重送會把整份登記表在一個同步迴圈裡一次打出去——
+  // 登記上限提到 96 之後大約是 120 幀／8KB，幀與幀之間完全沒有間隔。Brain 這端的 FIFO
+  // 跟得上，對面的 ESP32 跟不上：接收緩衝一溢位，剩下的位元組就整段掉在 COBS 幀中間。
+  // 連線不會斷，只是每一輪爆發固定撕掉一個封包，永遠如此。
+  // bounded_retry_write() 幫不上忙——它是對**本地** FIFO 流控，而本地根本不塞；對端沒有
+  // 任何反壓通道，所以唯一的解就是「不要送得比對方吃得下還快」。因此對**註冊爆發**
+  // （開機首次註冊與週期重送都算）套一個權杖桶；涓流期間送出的遙測也記進同一個桶。
+  // 預設值：每 10ms 視窗 320 bytes ＝總共 32KB/s，約 8KB 的登記表攤在約 0.45 秒送完，
+  // 而且 5 秒的重送週期是**從涓流送完之後**才開始算（兩輪不可能重疊）。
+  // registration_pace_bytes 填 0 ＝ 完全關閉涓流。
+  std::uint32_t registration_pace_bytes = 320;
+  std::uint32_t registration_pace_window_ms = 10;
+
   // 方案 A（watch 自動上報）鉤子。非 nullptr 時，pump 在每次 telemetry flush 前
   // 先呼叫它一次，讓 watch 登記表把所有登記變數取樣進 telemetry()。預設 nullptr
   // ＝維持舊行為（pump 只送呼叫端手動 put() 的樣本），既有呼叫者不受影響。放在

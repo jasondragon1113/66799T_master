@@ -143,7 +143,13 @@ void ConnectionPump::tick(std::uint32_t now_ms) {
           // dashboard instance has the full metadata again.
           ++stats_.reconnects;
           do_register();
-          last_registration_ms_ = now_ms;
+          // From the moment the burst FINISHED, same reason as the periodic
+          // resend below: with the trickle on, this call can take several
+          // hundred ms, and timing it from before would shorten the first
+          // real gap by exactly that much.
+          // 中文：從「這一輪送完」起算，理由同下面的週期重送——開了涓流之後這個
+          // 呼叫可能要好幾百毫秒，從呼叫之前起算會把第一段真實間隔剛好縮掉那麼多。
+          last_registration_ms_ = static_cast<std::uint32_t>(session_.transport_millis());
         }
         ever_up_ = true;
         link_state_ = LinkState::kUp;
@@ -188,7 +194,14 @@ void ConnectionPump::tick(std::uint32_t now_ms) {
   if (link_state_ == LinkState::kUp && config_.registration_resend_period_ms > 0 &&
       (now_ms - last_registration_ms_) >= config_.registration_resend_period_ms) {
     resend_registration();
-    last_registration_ms_ = now_ms;
+    // Restart the period from the moment the burst FINISHED, not from when it
+    // started. With the trickle on, a resend can take several hundred ms; timing
+    // from the start would shorten the real gap between bursts by that much and,
+    // if a burst ever ran longer than the period, would queue the next one the
+    // instant this one ended. 中文：週期從「這一輪送完」起算，不是從開始起算。
+    // 開了涓流之後一輪可能要好幾百毫秒；從開始算會把兩輪之間的真實間隔縮掉那麼多，
+    // 萬一一輪比週期還久，下一輪會在這輪結束的瞬間立刻接上去。
+    last_registration_ms_ = static_cast<std::uint32_t>(session_.transport_millis());
   }
 
   // 7b. Periodic device-map hotplug poll. The callback scans the smart ports
