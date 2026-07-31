@@ -154,4 +154,16 @@ bool arm_profile_running();
 // 能在遙控器上講一聲，而不是讓一次動作無聲無息地沒下文。arm_hold_here()（中止流程會
 // 呼叫它）與下一次 arm_move_profiled() 都會把它清掉。
 bool arm_profile_stalled();
+
+// Hand the arm motor over to something else (the feedforward ramp test) and take
+// it back. While disabled, arm_task() does not write to the motor at all --
+// exactly like cascade_control_set_enabled() for the lift -- so the two can never
+// fight over one motor. Re-enabling parks the arm where it is (see arm.cpp), so
+// control comes back with zero error instead of a jump to a stale target.
+// 中文：把手臂馬達交給別人（前饋斜坡測試），以及收回來。停用期間 arm_task() 完全不寫
+// 那顆馬達——跟滑軌的 cascade_control_set_enabled() 一樣——所以兩邊不會搶同一顆馬達。
+// 重新啟用時會把手臂就地停住（見 arm.cpp），控制權回來的瞬間誤差是 0，不會往一個過期
+// 的目標跳過去。
+void arm_control_set_enabled(bool enabled);
+bool arm_control_enabled();
 #endif

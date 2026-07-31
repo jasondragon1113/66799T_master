@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>   // std::int32_t, for the tune_seg channel below
+
 // PID-tuning teleop program -- a SEPARATE PROGRAM, not a mode.
 //
 // This is not a switch you flip on the field. It is a second build of the same
@@ -44,4 +46,49 @@ extern double CASCADE_LV0_DEG;
 extern double CASCADE_LV1_DEG;
 extern double CASCADE_LV2_DEG;
 extern double CASCADE_LV3_DEG;
+
+// --- feedforward ramp test: the dashboard's "量前饋" (TuningFlow) panel --------
+//
+// That panel does not look for a mechanism or a group -- it looks for FIVE
+// channels by these EXACT names (tuningFlow.ts accepts either the exact name or
+// an `xxx_tune_*` prefixed one) and stays blank until all five arrive:
+//
+//   tune_ms    ms since the ramp started
+//   tune_volt  the command being applied RIGHT NOW
+//   tune_pos   mechanism position
+//   tune_vel   mechanism velocity
+//   tune_seg   which leg: 0 = not running, 1 = forward, 2 = reverse
+//
+// Names and semantics follow the reference implementation in DPLIB
+// (dplib/src/telemetry.cpp:84-88 registers them, :284-287 feeds them from a
+// TuneSample), so the same panel works against both robots.
+//
+// UNITS: tune_volt is in PROS move() command units (-127..127), NOT volts. That
+// is deliberate -- it is the same scale as ARM_KG / CASCADE_KG, so a feedforward
+// number worked out from this data can be typed straight into those sliders with
+// no conversion step for anyone to get wrong.
+// 中文：dashboard 的「量前饋」面板不是照機構或群組找資料，而是照上面那五個**固定名字**
+// 找頻道（tuningFlow.ts 接受精準名或 `xxx_tune_*` 前綴），五條沒到齊就整頁空白。
+// 名字與語意照 DPLIB 的參考實作（telemetry.cpp:84-88 登記、:284-287 餵值）。
+// 單位注意：tune_volt 用的是 PROS move() 的指令刻度（-127~127），不是伏特。這是故意的
+// ——那正是 ARM_KG／CASCADE_KG 的刻度，從這批資料算出來的前饋值可以直接填進那兩顆滑桿，
+// 中間不會有一個換算步驟讓人搞錯。
+extern double TUNE_CH_MS;
+extern double TUNE_CH_VOLT;
+extern double TUNE_CH_POS;
+extern double TUNE_CH_VEL;
+extern std::int32_t TUNE_CH_SEG;
+
+// Dashboard command handlers (registered with requires_confirm, so the panel asks
+// before the robot moves). They only RAISE A REQUEST: they are called on the
+// vexdash pump task, and starting a motion from there would be driving the robot
+// from a background thread with none of the tuning program's safety state around
+// it. The main loop picks the request up on its next 10 ms pass and runs the ramp
+// itself -- the same handshake the chassis test moves already use.
+// 中文：dashboard 按鈕的處理函式（登記時帶 requires_confirm，所以面板會先跳確認才動）。
+// 它們只負責「舉手登記」：它們是在 vexdash 的背景 task 上被呼叫的，直接在那裡讓機器人
+// 動起來，等於用一條背景執行緒開車，而且完全繞過調參程式的安全狀態。主迴圈會在下一個
+// 10ms 迴圈接手、由主迴圈自己跑斜坡——跟底盤測試動作用的是同一套握手。
+void tune_ff_ramp_arm_command(void* user_data);
+void tune_ff_ramp_cascade_command(void* user_data);
 #endif

@@ -42,6 +42,16 @@
 //   左搖桿 Y／右搖桿 X       正常方向盤式駕駛（沒有測試動作在跑的時候才有效），
 //                            用來把車開回起點，不必用手搬
 //
+//   ── 前饋斜坡測試（沒有按鍵，從 dashboard 觸發）────────────────────
+//   dashboard「量前饋」面板上的兩顆按鈕：ff_ramp_arm（手臂）、ff_ramp_cascade
+//   （滑軌）。按下去會先跳確認（requires_confirm），確認後車端把電壓慢慢往一個
+//   方向加、再往另一個方向加，過程中送出 tune_ms／tune_volt／tune_pos／tune_vel／
+//   tune_seg 五條頻道給面板去算前饋值。
+//   安全：電壓上限 60/127 且是慢慢加、逼近行程末端就結束該段、每段與整場都有逾時、
+//   按任何一顆按鍵或推搖桿即中止、比賽狀態一變看門狗就收掉。測試期間該機構的控制器
+//   會先讓位（arm_control_set_enabled／cascade_control_set_enabled），結束後自動
+//   交還並就地停住。已經有東西在動的時候按面板按鈕：直接丟掉不排隊。
+//
 // 中止：**動作進行中按任何一顆按鍵**（同一顆也算）就中止——遙控器震一下、
 // 底盤電壓歸零、滑軌／手臂就地停住。搖桿大幅推動（超過 25／127）也會中止。
 //
@@ -122,6 +132,19 @@ double CASCADE_LV1_DEG = 300;   // Y
 double CASCADE_LV2_DEG = 1000;  // X
 double CASCADE_LV3_DEG = 2000;  // A
 
+// The five channels the dashboard's feedforward panel looks for by exact name.
+// See tune_opcontrol.h for the naming contract and for why tune_volt carries
+// move() command units instead of volts. External linkage: main.cpp registers
+// them.
+// 中文：dashboard「量前饋」面板照固定名字找的那五條頻道。命名規則、以及 tune_volt
+// 為什麼帶的是 move() 指令刻度而不是伏特，都寫在 tune_opcontrol.h。這裡用外部連結，
+// 因為登記的動作在 main.cpp。
+double TUNE_CH_MS = 0;
+double TUNE_CH_VOLT = 0;
+double TUNE_CH_POS = 0;
+double TUNE_CH_VEL = 0;
+std::int32_t TUNE_CH_SEG = 0;
+
 namespace {
 
 // --- what the test buttons aim at -------------------------------------------
@@ -200,8 +223,66 @@ constexpr int TUNE_STICK_DEADBAND = 5;
 
 pros::Controller tune_master(pros::E_CONTROLLER_MASTER);
 
+// --- feedforward ramp test ---------------------------------------------------
+// A slow, capped voltage ramp in one direction and then the other, with the
+// five tune_* channels published every cycle. The dashboard panel does the maths
+// on that data; this side only has to produce it safely.
+//
+// Three layers of protection, deliberately independent of each other, so no
+// single wrong number can let the ramp hurt the robot:
+//   1. Ceiling + slope: the command never exceeds TUNE_FF_MAX_CMD (well under
+//      the 127 the mechanism can take) and gets there slowly, so anything going
+//      wrong develops at walking pace instead of instantly.
+//   2. Travel limits: the leg ends as soon as the mechanism comes within a
+//      margin of either end of its travel. Checked against the SAME position
+//      source the controllers use, so it cannot disagree with them.
+//   3. Clocks: a per-leg timeout and a total timeout, either of which ends the
+//      test even if position readings have stopped making sense.
+// Plus the two the tuning program already had: any button or a stick push
+// aborts, and the competition watchdog ends it if the match state changes.
+// 中文：前饋斜坡測試——把電壓慢慢往一個方向加、再往另一個方向加，過程中每一圈把五條
+// tune_* 頻道送出去。計算是 dashboard 面板在做，車端只要負責「安全地把資料生出來」。
+// 三層保護，而且刻意彼此獨立，任何一個數字寫錯都不足以讓斜坡弄壞機構：
+//   1. 上限＋斜率：指令永遠不超過 TUNE_FF_MAX_CMD（遠低於機構吃得下的 127），而且是
+//      慢慢加上去的，出事也是用走的速度發生，不是一瞬間。
+//   2. 行程夾限：機構一接近行程兩端的安全邊界就結束這一段。用的是跟控制器同一個位置
+//      來源，所以不可能兩邊講的位置不一樣。
+//   3. 計時：每一段有逾時、整場也有總逾時，就算位置讀數整個壞掉也一定會結束。
+// 再加上調參程式本來就有的兩層：按任何鍵或推搖桿即中止、比賽狀態一變看門狗就收掉。
+enum class FfTarget { NONE, ARM, CASCADE };
+
+constexpr float TUNE_FF_MAX_CMD = 60.0f;        // out of 127 中文：127 分之
+constexpr float TUNE_FF_RAMP_RATE = 12.0f;      // command units per second 中文：每秒加多少
+constexpr int TUNE_FF_SEG_TIMEOUT_MS = 8000;
+constexpr int TUNE_FF_TOTAL_TIMEOUT_MS = 20000;
+// How close to the end of travel the mechanism may get before the leg is ended.
+// 中文：機構最多可以逼近行程末端到什麼程度，超過就結束這一段。
+constexpr float TUNE_FF_ARM_MARGIN_DEG = 15.0f;
+constexpr float TUNE_FF_CASCADE_MARGIN_DEG = 200.0f;
+// Velocity is a difference of two positions 10 ms apart, which is nearly all
+// sensor noise on its own. This one-pole filter is what makes the curve
+// readable; it lags by a few cycles, which does not matter for a ramp this slow.
+// 中文：速度是相隔 10ms 的兩個位置相減，單看幾乎全是感測雜訊。這個一階濾波是讓曲線
+// 看得懂的關鍵；代價是慢個幾圈，對這麼慢的斜坡完全無所謂。
+constexpr float TUNE_FF_VEL_FILTER = 0.25f;
+
+// Raised by the dashboard command handlers, which run on the vexdash pump task.
+// 0 = nothing pending, 1 = arm, 2 = cascade. volatile for the same reason the
+// chassis handshake flags are: one writer, one reader, 10 ms polling.
+// 中文：由 dashboard 命令的處理函式舉起來的旗標，那些函式跑在 vexdash 的背景 task。
+// 0＝沒事、1＝手臂、2＝滑軌。用 volatile 的理由跟底盤那組握手旗標一樣：一個寫、一個
+// 讀、10ms 輪詢。
+volatile int ff_request = 0;
+
+FfTarget ff_target = FfTarget::NONE;
+float ff_cmd = 0;
+float ff_vel = 0;
+float ff_last_pos = 0;
+std::uint32_t ff_start_ms = 0;
+std::uint32_t ff_seg_start_ms = 0;
+
 // --- which test is running ---------------------------------------------------
-enum class ActiveTest { NONE, CHASSIS, ARM, CASCADE };
+enum class ActiveTest { NONE, CHASSIS, ARM, CASCADE, FF_RAMP };
 enum class ChassisMove { NONE, DRIVE_FWD, DRIVE_BACK, TURN_LEFT, TURN_RIGHT };
 
 ActiveTest active_test = ActiveTest::NONE;
@@ -394,12 +475,209 @@ void tune_cascade_goto(float deg){
 // 誤差爆一下。
 // 原本調參版是唯一沒有這段的地方，代表長時間調參後滑軌的原點會漂掉，圖表上每一個
 // cascade 數字都是從錯的原點量出來的。
+// Defined with the ramp code below. Declared here because the limit switch is
+// serviced above it and has to tell it about the position jump.
+// 中文：定義在下面的斜坡那一段。因為限位開關的處理在它上面，而那裡必須通知它「位置
+// 剛剛跳了」，所以先在這裡宣告。
+void ff_notify_position_jump();
+
 void tune_service_cascade_limit(){
   if(cascade_limit.get_value() == 1){
     cascade1.tare_position();
     cascade2.tare_position();
     cascade_notify_tare();
+    // The cascade's zero just moved, so every consumer holding a position from
+    // BEFORE the tare is now comparing two different coordinate frames. The PID
+    // is handled by cascade_notify_tare() above; the feedforward ramp keeps its
+    // own previous position to difference for velocity, and left stale it would
+    // produce one sample of tens of thousands of deg/s -- a single outlier that
+    // is more than enough to bend the curve fit the whole test exists to feed.
+    // 中文：滑軌的零點剛剛被移走，所以任何還握著「歸零之前」位置的人，現在都是拿兩套
+    // 座標在比。PID 那邊上面的 cascade_notify_tare() 已經處理掉了；前饋斜坡自己也留著
+    // 上一圈的位置在算速度，不通知它的話會生出一筆好幾萬 deg/s 的樣本——這一筆離群值
+    // 就足以把整個測試辛苦要餵的那條擬合線拉歪。
+    ff_notify_position_jump();
   }
+}
+
+// --- feedforward ramp: mechanism-agnostic plumbing ---------------------------
+// Position comes from the SAME function the mechanism's own controller uses, so
+// the ramp's travel-limit checks and the controller's can never disagree about
+// where the mechanism is. For the arm that is the rotation sensor on port 21
+// (arm_get_position_deg() -- the arm controller does not read the motor's
+// encoder at all), which is also what tune_pos and tune_vel below are computed
+// from, so the feedforward number the dashboard works out belongs to the same
+// feedback the PID will use it with.
+// 中文：位置一律取自「機構自己的控制器用的那個函式」，這樣斜坡的行程判斷跟控制器的
+// 判斷不可能對不上。手臂那邊就是埠 21 的 rotation 感測器（arm_get_position_deg()——
+// 手臂控制器根本不讀馬達編碼器），下面的 tune_pos／tune_vel 也是從同一個來源算出來
+// 的，所以 dashboard 算出來的前饋值，跟之後 PID 搭配使用的回饋是同一套。
+float ff_position(){
+  return ff_target == FfTarget::ARM ? arm_get_position_deg()
+                                    : cascade_get_position_deg();
+}
+
+float ff_limit_lo(){
+  return ff_target == FfTarget::ARM ? ARM_MIN_DEG + TUNE_FF_ARM_MARGIN_DEG
+                                    : TUNE_FF_CASCADE_MARGIN_DEG;
+}
+
+float ff_limit_hi(){
+  return ff_target == FfTarget::ARM
+             ? ARM_MAX_DEG - TUNE_FF_ARM_MARGIN_DEG
+             : CASCADE_EXTEND_LIMIT_DEG - TUNE_FF_CASCADE_MARGIN_DEG;
+}
+
+// Something re-zeroed the encoder the ramp is measuring. Re-anchor the previous
+// position so the next velocity sample is a real movement instead of the size of
+// the coordinate shift. Velocity itself is untouched: the mechanism did not
+// actually move, only the numbering did.
+// 中文：有人把斜坡正在量的那顆編碼器歸零了。這裡把「上一圈的位置」重新對準，好讓下一
+// 筆速度算的是真正的位移，不是座標平移的大小。速度本身不動：機構其實沒有動，動的只是
+// 編號方式。
+void ff_notify_position_jump(){
+  if(ff_target == FfTarget::NONE) return;
+  ff_last_pos = ff_position();
+}
+
+void ff_write(float cmd){
+  if(ff_target == FfTarget::ARM){
+    arm.move(cmd);
+  }
+  else if(ff_target == FfTarget::CASCADE){
+    cascade1.move(cmd);
+    cascade2.move(cmd);
+  }
+}
+
+// Put the mechanism back under its own controller and stop feeding the panel.
+// Safe to call twice (the abort path and the "finished" path can both reach it).
+// 中文：把機構交還給它自己的控制器，並停止餵資料給面板。呼叫兩次也安全（中止流程跟
+// 正常結束流程都會走到這裡）。
+void ff_ramp_finish(){
+  ff_write(0);
+  ff_cmd = 0;
+  TUNE_CH_VOLT = 0;
+  TUNE_CH_SEG = 0;   // 0 = not running, the panel stops collecting 中文：0＝沒在跑
+
+  if(ff_target == FfTarget::ARM){
+    // Re-enabling parks the arm on its current angle (arm.cpp), so it holds
+    // instead of dropping the moment the ramp stops pushing.
+    // 中文：重新啟用會把手臂停在它現在的角度（見 arm.cpp），所以斜坡一停手，手臂是
+    // 撐住、不是掉下去。
+    arm_control_set_enabled(true);
+  }
+  else if(ff_target == FfTarget::CASCADE){
+    cascade_set_target(cascade_get_position_deg());
+    cascade_notify_tare();
+    cascade_control_set_enabled(true);
+  }
+  ff_target = FfTarget::NONE;
+}
+
+void ff_ramp_start(FfTarget target, const char* label){
+  ff_target = target;
+  // Take the motor away from its controller FIRST. Two writers on one motor is
+  // two people steering: the ramp would be fighting the PID for every cycle and
+  // the voltage on the wire would be neither one's.
+  // 中文：先把馬達從它的控制器手上接過來。同一顆馬達兩個人在寫＝兩個人一起轉方向盤，
+  // 斜坡會跟 PID 每一圈互搶，實際上線的電壓誰的也不是。
+  if(target == FfTarget::ARM) arm_control_set_enabled(false);
+  else                        cascade_control_set_enabled(false);
+
+  ff_cmd = 0;
+  ff_vel = 0;
+  ff_write(0);
+  ff_start_ms = pros::millis();
+  ff_seg_start_ms = ff_start_ms;
+  ff_last_pos = ff_position();
+
+  TUNE_CH_MS = 0;
+  TUNE_CH_VOLT = 0;
+  TUNE_CH_POS = ff_last_pos;
+  TUNE_CH_VEL = 0;
+  TUNE_CH_SEG = 1;   // leg 1 = forward 中文：第 1 段＝正向
+
+  active_test = ActiveTest::FF_RAMP;
+  test_started_ms = ff_start_ms;
+  screen_set(1, label);
+}
+
+// One 10 ms step. Returns false when the test is over (either leg finished, or
+// a protection ended it) -- the caller then calls ff_ramp_finish().
+// 中文：一個 10ms 步進。回傳 false＝測試結束（兩段都跑完，或是被某一層保護收掉），
+// 呼叫端接著呼叫 ff_ramp_finish()。
+bool ff_ramp_step(){
+  const float dt = TUNE_LOOP_MS / 1000.0f;
+  const std::uint32_t now = pros::millis();
+
+  float pos = ff_position();
+  float raw_vel = (pos - ff_last_pos) / dt;
+  ff_last_pos = pos;
+  ff_vel += TUNE_FF_VEL_FILTER * (raw_vel - ff_vel);
+
+  // Publish BEFORE any early return, so the last sample the panel sees is the
+  // one that ended the test rather than a stale cycle.
+  // 中文：先送資料再做任何提早結束的判斷，這樣面板看到的最後一筆就是「結束當下」那一
+  // 筆，不是上一圈的舊資料。
+  TUNE_CH_MS = (double)(now - ff_start_ms);
+  TUNE_CH_POS = pos;
+  TUNE_CH_VEL = ff_vel;
+  // tune_volt is NOT published here: this cycle's command has not been worked
+  // out yet, so publishing now would pair every position/velocity sample with
+  // the PREVIOUS cycle's voltage -- a constant one-sample lag between the two
+  // columns the panel regresses against each other. It is published right after
+  // ff_write() below, in the same pass that puts it on the motor. On the early
+  // returns between here and there it keeps the value that really was on the
+  // motor for the last cycle, which is still the honest answer.
+  // 中文：tune_volt 不在這裡送：這一圈的指令還沒算出來，現在送等於把每一筆位置／速度
+  // 都配上「上一圈」的電壓——面板拿來互相回歸的那兩欄之間會固定差一筆。它改成在下面
+  // ff_write() 之後、跟寫進馬達同一圈送出。從這裡到那裡之間的提早結束路徑，它保留的是
+  // 上一圈真正加在馬達上的值，那依然是誠實的答案。
+
+  // Protection 3a: no trustworthy arm position means no travel-limit protection
+  // at all, so there is no safe way to keep pushing.
+  // 中文：手臂位置讀不到＝行程保護整層失效，那就沒有「繼續推下去」的安全做法了。
+  if(ff_target == FfTarget::ARM && !arm_sensor_ok) return false;
+
+  // Protection 3b: total clock.
+  if(now - ff_start_ms > (std::uint32_t)TUNE_FF_TOTAL_TIMEOUT_MS) return false;
+
+  const bool forward = (TUNE_CH_SEG == 1);
+  bool leg_done = false;
+
+  if(forward){
+    ff_cmd += TUNE_FF_RAMP_RATE * dt;
+    if(ff_cmd > TUNE_FF_MAX_CMD) ff_cmd = TUNE_FF_MAX_CMD;
+    leg_done = ff_cmd >= TUNE_FF_MAX_CMD || pos >= ff_limit_hi();
+  }
+  else{
+    ff_cmd -= TUNE_FF_RAMP_RATE * dt;
+    if(ff_cmd < -TUNE_FF_MAX_CMD) ff_cmd = -TUNE_FF_MAX_CMD;
+    leg_done = ff_cmd <= -TUNE_FF_MAX_CMD || pos <= ff_limit_lo();
+  }
+  if(now - ff_seg_start_ms > (std::uint32_t)TUNE_FF_SEG_TIMEOUT_MS) leg_done = true;
+
+  ff_write(ff_cmd);
+  // Same pass as the write, so the sample the panel receives has the voltage
+  // that is on the motor next to the position and velocity it produced.
+  // 中文：跟寫馬達同一圈送出，這樣面板收到的那一筆裡，電壓就是「現在真的加在馬達上
+  // 的那個」，跟它造成的位置與速度擺在一起。
+  TUNE_CH_VOLT = ff_cmd;
+
+  if(!leg_done) return true;
+  if(!forward) return false;   // both legs done 中文：兩段都跑完了
+
+  // Forward leg finished: hand over to the reverse leg from zero command, with
+  // its own clock and its own velocity history.
+  // 中文：正向那段跑完，交棒給反向那段：指令從 0 重新開始，計時與速度歷史也重來。
+  ff_cmd = 0;
+  ff_write(0);
+  ff_vel = 0;
+  ff_seg_start_ms = now;
+  TUNE_CH_SEG = 2;   // leg 2 = reverse 中文：第 2 段＝反向
+  TUNE_CH_VOLT = 0;
+  return true;
 }
 
 // Stop a running chassis move NOW. Called from the button loop AND from the
@@ -491,6 +769,13 @@ void abort_active_test(bool buzz){
     case ActiveTest::ARM:
       arm_hold_here();
       break;
+    case ActiveTest::FF_RAMP:
+      // Zero the command, give the motor back to its controller, and stop
+      // feeding the panel -- all three are in ff_ramp_finish().
+      // 中文：把指令歸零、把馬達還給它的控制器、停止餵資料給面板——三件事都在
+      // ff_ramp_finish() 裡。
+      ff_ramp_finish();
+      break;
     default:
       break;
   }
@@ -503,17 +788,43 @@ void abort_active_test(bool buzz){
 // would happily keep driving. This runs forever and cuts a move dead as soon as
 // the robot is not in teleop.
 //
-// It deliberately does not touch the arm or the cascade: during autonomous the
-// team's own routines own those two, and disabled() in main.cpp already parks
-// the cascade. All this owns is "a tuning move must not outlive teleop".
-// 中文：比賽一被 disable 或進入自走，場控會直接砍掉 opcontrol，但**不會**砍上面
-// 那支 worker——它會若無其事繼續開車。這支看門狗永遠在跑，只要不在遙控期就立刻
-// 把動作掐掉。它刻意不碰手臂與滑軌：自走期間那兩個是自走程式在管，disabled()
-// 本來就已經把滑軌控制器停掉了。它只負責一件事：調參動作不准活過遙控期。
+// It deliberately does not touch the arm or the cascade while they are under
+// their own controllers: during autonomous the team's own routines own those
+// two, and disabled() in main.cpp already parks the cascade.
+//
+// A FEEDFORWARD RAMP is the exception, and it is the one case where doing
+// nothing is not "leaving it to the other program" but a robot left powered.
+// The ramp is not a controller with a target -- it is a raw voltage written to a
+// motor by the opcontrol task, plus that mechanism's controller switched OFF.
+// Field control deletes opcontrol without warning, and everything the ramp does
+// on the way out lives in that deleted task, so without this branch:
+//   * the last command written (up to 60/127) stays on the arm or the lift,
+//     because nothing ever writes to those motors again, and
+//   * arm_control_enabled_flag stays false forever, so arm_task() never touches
+//     the arm again either -- autonomous arm_set_position() calls would set a
+//     target that nobody drives to, silently, until the robot is rebooted.
+// ff_ramp_finish() is idempotent (it zeroes the command, hands the motor back
+// and clears ff_target), so calling it here races safely with the main loop
+// calling it for the same test.
+// 中文：比賽一被 disable 或進入自走，場控會直接砍掉 opcontrol，但**不會**砍上面那支
+// worker——它會若無其事繼續開車。這支看門狗永遠在跑，只要不在遙控期就立刻把動作掐掉。
+// 它刻意不碰「還在自己控制器手上」的手臂與滑軌：自走期間那兩個是自走程式在管，
+// disabled() 本來就已經把滑軌控制器停掉了。
+// 前饋斜坡是例外，而且是「什麼都不做」不等於「交給別的程式」、而等於「把機器人通著電
+// 丟在那裡」的唯一情況。斜坡不是一個有目標的控制器，它是 opcontrol task 直接寫給馬達
+// 的生電壓，外加那個機構的控制器被關掉。場控砍 opcontrol 不會先講，而斜坡所有的善後
+// 都寫在那支被砍掉的 task 裡，所以沒有這個分支的話：
+//   * 最後寫下去的指令（最高 60/127）會一直留在手臂或升降上，因為之後再也沒有人寫那
+//     兩顆馬達，而且
+//   * arm_control_enabled_flag 會永遠停在 false，arm_task() 從此不再碰手臂——自走呼叫
+//     arm_set_position() 只會設一個沒人去開的目標，安靜地失效到重開機為止。
+// ff_ramp_finish() 是冪等的（指令歸零、把馬達交還、清掉 ff_target），所以這裡跟主迴圈
+// 同時對同一次測試呼叫它也是安全的。
 void tune_safety_task(){
   while(true){
     if(pros::competition::is_disabled() || pros::competition::is_autonomous()){
       if(move_running || move_requested) abort_chassis_move();
+      if(ff_target != FfTarget::NONE) ff_ramp_finish();
     }
     pros::delay(20);
   }
@@ -546,6 +857,22 @@ void tune_arm_goto(ArmPosition pos, const char* label){
 
 } // namespace
 
+// --- dashboard command handlers ---------------------------------------------
+// Called by the vexdash pump task when someone presses the panel's button and
+// confirms. They do NOT move anything: they raise a request that the main loop
+// picks up on its next 10 ms pass, and only when nothing else is running. See
+// tune_opcontrol.h for why a background task must not start a motion directly.
+// 中文：使用者在面板上按下按鈕並確認之後，由 vexdash 的背景 task 呼叫。它們不會讓任何
+// 東西動起來：只是舉一個旗標，由主迴圈在下一個 10ms 迴圈、而且是在「什麼都沒在跑」的
+// 情況下才接手。為什麼背景 task 不可以直接讓機器人動，見 tune_opcontrol.h。
+void tune_ff_ramp_arm_command(void* /*user_data*/){
+  ff_request = 1;
+}
+
+void tune_ff_ramp_cascade_command(void* /*user_data*/){
+  ff_request = 2;
+}
+
 void tune_opcontrol(){
   save_voltage_caps();
   // Teleop can start again after field control killed this task mid-abort, with
@@ -554,6 +881,13 @@ void tune_opcontrol(){
   // 中文：場控有可能在「中止進行到一半」的時候把這支 task 砍掉，那時電壓上限還
   // 停在 0；下一段遙控期一定會先跑到這裡，所以在這裡把它們放回去最保險。
   restore_voltage_caps();
+  // Same story for a test that was running when the task died: the watchdog
+  // already made the machine safe, but the state variables can still say "mid
+  // FF ramp", which would eat keys for up to a segment timeout. Fresh teleop,
+  // fresh state. 中文：同理，task 被砍時若有測試在跑，看門狗已把機器收乾淨，但
+  // 狀態變數可能還停在「斜坡進行中」，會白吃按鍵直到段逾時——重進遙控就重設。
+  active_test = ActiveTest::NONE;
+  ff_target = FfTarget::NONE;
 
   // Same teleop hand-over the normal driving loop does (see control_arcade()):
   // zero the cascade encoders at the physical bottom the robot was placed at,
@@ -614,6 +948,11 @@ void tune_opcontrol(){
     // ---- competition lockout ------------------------------------------------
     if(competition_lockout()){
       if(active_test != ActiveTest::NONE) abort_active_test(false);
+      // Drop any dashboard request too: a button pressed during a match must not
+      // be waiting to fire the moment teleop comes back.
+      // 中文：dashboard 的請求也一併丟掉——比賽中按到的按鈕，不可以留在那裡等遙控期
+      // 一恢復就自己啟動。
+      ff_request = 0;
       screen_set(1, "COMP LOCK");
       last_any = false;
       pros::delay(TUNE_LOOP_MS);
@@ -657,6 +996,15 @@ void tune_opcontrol(){
 
     // ---- a test is running: the ONLY thing any input does is stop it --------
     if(active_test != ActiveTest::NONE){
+      // A dashboard button pressed while something is already moving is dropped,
+      // not queued. Queuing it would mean the robot starts a ramp by itself some
+      // seconds later, with nobody's hand near the controller -- the one thing a
+      // remote-triggered motion must never do.
+      // 中文：機構正在動的時候按 dashboard 按鈕，一律丟掉、不排隊。排隊的話等於機器人
+      // 過幾秒之後自己開始跑斜坡，而那時候沒有人的手在遙控器旁邊——遠端觸發的動作最不
+      // 該做的就是這件事。
+      ff_request = 0;
+
       bool stick_grab = fabs(throttle) > TUNE_STICK_ABORT ||
                         fabs(turn) > TUNE_STICK_ABORT;
 
@@ -727,6 +1075,18 @@ void tune_opcontrol(){
           screen_set(1, "ARM TIMEOUT");
         }
       }
+      else if(active_test == ActiveTest::FF_RAMP){
+        // The ramp owns the motor while this runs; ff_ramp_step() is where every
+        // protection lives and it says when the test is over.
+        // 中文：這段期間馬達歸斜坡管；所有保護都在 ff_ramp_step() 裡，什麼時候結束
+        // 也由它說了算。
+        if(!ff_ramp_step()){
+          ff_ramp_finish();
+          active_test = ActiveTest::NONE;
+          screen_set(1, "FF DONE");
+          tune_master.rumble(".");
+        }
+      }
       else if(active_test == ActiveTest::CASCADE){
         if(elapsed > 30 && cascade_settled){
           active_test = ActiveTest::NONE;
@@ -738,6 +1098,25 @@ void tune_opcontrol(){
         }
       }
 
+      pros::delay(TUNE_LOOP_MS);
+      continue;
+    }
+
+    // ---- idle: a dashboard command can start the feedforward ramp ----------
+    // Reached only when nothing is running (the branch above never falls
+    // through), so a remote-triggered motion starts from exactly the same
+    // standing-still state a button press would. The panel already made the user
+    // confirm (requires_confirm), and the buzz is the robot-side warning that
+    // something is about to move without anyone touching the controller.
+    // 中文：只有在「什麼都沒在跑」的時候才會走到這裡（上面那個分支不會漏下來），所以
+    // 遠端觸發的動作，起點跟人按按鍵一模一樣＝機構是靜止的。面板那邊已經要求使用者確認
+    // 過（requires_confirm），這裡震一下則是車端的警告：沒有人碰遙控器，但東西要動了。
+    if(ff_request != 0){
+      int req = ff_request;
+      ff_request = 0;
+      tune_master.rumble("-");
+      if(req == 1) ff_ramp_start(FfTarget::ARM,     "FF RAMP ARM");
+      else         ff_ramp_start(FfTarget::CASCADE, "FF RAMP CASC");
       pros::delay(TUNE_LOOP_MS);
       continue;
     }

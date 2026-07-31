@@ -11,8 +11,37 @@ ArmPosition arm_target = ArmPosition::DOWN;
 // Or drag ARM_*_DEG on the dashboard Config panel and watch the arm move --
 // the values write back live, so you can find them without rebuilding.
 //
-// DOWN is 0, and 0 is now a FIXED physical position -- the arm's bottom hard
-// stop -- not "wherever the arm was at boot". See ARM_ZERO_ANGLE_DEG below.
+// WHERE ZERO IS, and why it matters more than it looks.
+//
+// Every number in this file is in ROTATION-SENSOR degrees: the whole arm
+// controller reads arm_rotation (port 21) through arm_get_position_deg() and
+// never reads the arm motor's own encoder. (arm.tare_position() in arm_task()
+// zeroes the motor encoder purely so the V5 Brain's built-in MOTORS screen shows
+// a sensible number; nothing reads it back.)
+//
+// But arm_task() calls arm_rotation.reset_position() when it starts, so ZERO IS
+// WHEREVER THE ARM HAPPENS TO BE SITTING AT PROGRAM START -- it is NOT a fixed
+// physical position. The arm has no limit switch to re-zero against (only the
+// cascade does, on ADI 'D'), so there is nothing that can correct it later.
+// Practical consequence: park the arm on its bottom hard stop BEFORE running the
+// program. Start with it half-raised and all four presets below are offset by
+// that much for the whole session, which looks exactly like "the presets are
+// wrong" or "it isn't reading the sensor" -- it is, from a shifted origin.
+// (An earlier version of this comment claimed zero was the hard stop and pointed
+// at an ARM_ZERO_ANGLE_DEG that does not exist in this file. It never did.)
+// 中文：零點在哪裡，以及為什麼它比看起來重要。
+// 這個檔案裡每一個數字都是「rotation 感測器的度數」：整套手臂控制器都是透過
+// arm_get_position_deg() 讀 arm_rotation（埠 21），從來不讀手臂馬達自己的編碼器。
+// （arm_task() 裡的 arm.tare_position() 只是為了讓 V5 大腦內建的 MOTORS 畫面顯示
+// 合理數字，沒有任何程式讀它。）
+// 但是 arm_task() 一開始會呼叫 arm_rotation.reset_position()，所以「零」＝程式啟動
+// 那一刻手臂剛好停在哪裡，不是一個固定的物理位置。手臂沒有限位開關可以重新歸零
+// （只有滑軌有，在 ADI 'D'），所以之後也沒有任何東西能把它修回來。
+// 實務上的意思：跑程式之前先把手臂放到最底下的硬止點。要是啟動時手臂是半抬著的，
+// 底下四個預設位置整場都會差那麼多——看起來就會像「預設值錯了」或「它根本沒讀感測
+// 器」，其實它有讀，只是原點被移走了。
+// （這段註解的舊版本說零點是硬止點、還叫人去看一個 ARM_ZERO_ANGLE_DEG——這個常數在
+// 這個檔案裡從來不存在。）
 float ARM_DOWN_DEG = 0;
 float ARM_POS_1_DEG = 283;
 float ARM_POS_2_DEG = 160;   // LEFT sequence's final position, after the cascade is back at 0
@@ -161,6 +190,15 @@ constexpr int ARM_PROFILE_FROZEN_MAX_VOLTAGE = 40; // out of 127 中文：127 �
 static bool arm_profile_frozen = false;
 static std::uint32_t arm_profile_freeze_start_ms = 0;
 static bool arm_profile_stall = false;
+
+// Whether arm_task() is allowed to write to the arm motor at all. The
+// feedforward ramp test drives the motor directly with its own voltages, and two
+// writers on one motor means neither one is in control. Mirrors exactly what
+// cascade_control_set_enabled() already does for the lift.
+// 中文：arm_task() 現在准不准寫手臂馬達。前饋斜坡測試要自己直接給電壓，同一顆馬達
+// 有兩個人在寫＝兩個人都沒在控制。作法跟滑軌那邊的 cascade_control_set_enabled()
+// 完全一樣。
+static bool arm_control_enabled_flag = true;
 #endif
 
 void arm_set_position(ArmPosition pos){
@@ -247,6 +285,22 @@ bool arm_profile_running(){
 
 bool arm_profile_stalled(){
   return arm_profile_stall;
+}
+
+void arm_control_set_enabled(bool enabled){
+  // Handing control back: park the arm on its current angle and drop any profile
+  // so it cannot resume a move that was interrupted by the ramp, and so the PID
+  // starts from zero error instead of yanking the arm to a stale target.
+  // 中文：把控制權交還回來的時候，把手臂停在它現在的角度、順手丟掉梯形，這樣被斜坡
+  // 打斷的動作不會自己續跑，PID 也是從「誤差 0」開始，不會把手臂拉去一個過期的目標。
+  if(enabled && !arm_control_enabled_flag){
+    arm_hold_here();
+  }
+  arm_control_enabled_flag = enabled;
+}
+
+bool arm_control_enabled(){
+  return arm_control_enabled_flag;
 }
 
 // One 10 ms step of the trapezoid. Returns the angle the PID should be given
@@ -390,6 +444,26 @@ void arm_task(){
     armPID.ki = ARM_KI;
     armPID.kd = ARM_KD;
     armPID.starti = ARM_STARTI;
+
+#ifdef PID_TUNE_PROGRAM
+    // Someone else owns the motor right now (the feedforward ramp test). Do not
+    // write to it at all, and keep the PID's memory clear -- an integral built up
+    // against a target nobody was driving to would be dumped into the arm the
+    // instant control comes back. Telemetry keeps flowing so the ramp's own
+    // sampling and the graph still agree on where the arm is.
+    // 中文：現在馬達歸別人管（前饋斜坡測試）。這時候一個字都不寫給它，並且把 PID 的
+    // 記憶清乾淨——對著一個沒人在開的目標累積的積分，等控制權回來就會整包倒進手臂。
+    // 遙測照常更新，這樣斜坡自己的取樣跟圖表對「手臂在哪」的說法才會一致。
+    if(!arm_control_enabled_flag){
+      armPID.accumulated_error = 0;
+      armPID.previous_error = 0;
+      tele_arm_angle = arm_get_position_deg();
+      tele_arm_output = 0;
+      arm_settled = false;
+      delay(10);
+      continue;
+    }
+#endif
 
     // goal = where the arm is being sent. target = what the PID is asked for
     // THIS cycle, which is the same thing unless a profile is walking it there.

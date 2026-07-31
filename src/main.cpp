@@ -143,13 +143,55 @@ void initialize() {
 	vexdash::watch_config("arm_acc", &ARM_PROFILE_ACC_DPS2, "arm/profile"); // deg/s^2
 	vexdash::watch_config("arm_dec", &ARM_PROFILE_DEC_DPS2, "arm/profile"); // deg/s^2
 	vexdash::watch("arm_setpoint", &tele_arm_setpoint, "deg", -1, "arm/profile");
-#endif
+
+	// --- vexdash: feedforward ramp test (tuning build only) ---
+	// The dashboard's "量前饋" panel matches on these FIVE EXACT channel names and
+	// shows nothing until all five exist -- see tune_opcontrol.h for the contract
+	// and for why tune_volt carries move() command units rather than volts.
+	// No group/path is passed on purpose: the panel looks the names up globally,
+	// and a path would only add a grouping the panel does not read.
+	// 中文：dashboard 的「量前饋」面板是照這五個**固定名字**比對的，五條沒到齊就整頁
+	// 空白——命名規則、以及 tune_volt 為什麼帶的是 move() 指令刻度而不是伏特，見
+	// tune_opcontrol.h。這裡故意不填群組路徑：面板是用全域名字找的，填了也只是多一個
+	// 它不會讀的分組。
+	vexdash::watch("tune_ms",   &TUNE_CH_MS,   "ms");
+	vexdash::watch("tune_volt", &TUNE_CH_VOLT, "cmd");   // -127..127, same scale as *_KG
+	vexdash::watch("tune_pos",  &TUNE_CH_POS,  "deg");
+	vexdash::watch("tune_vel",  &TUNE_CH_VEL,  "deg/s");
+	vexdash::watch("tune_seg",  &TUNE_CH_SEG,  "leg");   // 0 idle, 1 forward, 2 reverse
+
+	// The panel only shows its one-press buttons for commands that exist, so the
+	// five channels above are half the feature and these two are the other half.
+	// requires_confirm=true: this moves a real mechanism with nobody's hand on the
+	// controller, so the panel must ask first. Commands live in their own 16-slot
+	// registry (command_registry.h), NOT in the 64-entry watch table -- they cost
+	// nothing against the budget below.
+	// 中文：面板只會為「真的存在的命令」長出一鍵按鈕，所以上面五條頻道是功能的一半，
+	// 這兩顆命令是另一半。requires_confirm=true：它會在沒有人手放在遙控器上的情況下讓
+	// 真的機構動起來，所以面板一定要先問。命令走的是自己那張 16 格的表
+	// （command_registry.h），不佔下面那張 64 格的 watch 表，對預算是零成本。
+	vexdash::declare_command("ff_ramp_arm", &tune_ff_ramp_arm_command,
+	                         /*requires_confirm=*/true);
+	vexdash::declare_command("ff_ramp_cascade", &tune_ff_ramp_cascade_command,
+	                         /*requires_confirm=*/true);
 
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
+	// COMPETITION BUILD ONLY. In the tuning build opcontrol() hands straight over
+	// to tune_opcontrol() and never reaches the code that reads these four, so
+	// there they are four sliders that cannot do anything -- and the tuning
+	// program's own L1/L2/R1/R2 keys are the same tests done properly (with abort,
+	// timeouts and a competition watchdog). Keeping them out of that build is what
+	// pays for the five tune_* channels above.
+	// 中文：只有比賽版才登記這四顆。調參版的 opcontrol() 直接交棒給 tune_opcontrol()，
+	// 永遠不會執行到讀這四個變數的程式，所以在那一版它們是「拉了也不會怎樣」的四顆滑桿
+	// ——而且調參版自己的 L1/L2/R1/R2 就是同樣的測試、還做得更完整（有中止、有逾時、有
+	// 比賽看門狗）。把它們排除在調參版之外，正是上面五條 tune_* 頻道的名額來源。
+#else
 	vexdash::watch_config("test_distance", &test_distance,  "drive/test"); // inches
 	vexdash::watch_config("run_drive",     &run_drive_test, "drive/test"); // toggle ON to drive
 	vexdash::watch_config("test_angle",    &test_angle,     "turn/test");  // degrees
 	vexdash::watch_config("run_turn",      &run_turn_test,  "turn/test");  // toggle ON to turn
+#endif
 
 	// --- vexdash: stream the port-5 motor (intake) onto the Graph: pos/rpm/temp/amp ---
 	vexdash::watch_motor("motor", intake);
