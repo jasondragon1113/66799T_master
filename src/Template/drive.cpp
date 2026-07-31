@@ -952,6 +952,29 @@ void Drive::control_arcade(){
       cascade_notify_tare();
     }
 
+    // --- intake (R1/R2) and cascade (L1/L2): TWO INDEPENDENT if-chains ---
+    // They used to share ONE else-if chain with the intake first, which made the
+    // two mechanisms lock each other out:
+    //   * Holding L1 (cascade up) and then tapping R1 took the intake branch and
+    //     skipped the cascade branch entirely. cascade_jog_on stayed true with
+    //     the last jog voltage, so the lift carried on rising -- and the travel
+    //     limit checked here was no longer being evaluated at all.
+    //   * The L1/L2 branches never ran intake.move(0), so an intake spun up with
+    //     R1 kept turning at 127 after the driver let go and pressed L1.
+    //   * cascade_jog_stop() lived in the shared else branch, which R1/R2 stole,
+    //     so once the intake grabbed the chain the jog was never handed back.
+    // Split into two chains, each mechanism is now evaluated every single loop.
+    // 中文：intake（R1/R2）與 cascade（L1/L2）改成兩條各自獨立的 if 鏈。以前兩者共用
+    // 同一條 else-if、而且 intake 排在前面，結果兩個機構互相卡死：
+    //   * 壓著 L1（升 cascade）再按 R1，會走進 intake 那支、整個跳過 cascade 那段。
+    //     cascade_jog_on 維持 true、電壓維持上一次的值，升降繼續往上開，而且這裡的
+    //     行程上限根本沒有被執行到。
+    //   * L1/L2 那兩支從來不會呼叫 intake.move(0)，所以 R1 轉起來的 intake，放開 R1
+    //     改壓 L1 之後還在 127 空轉。
+    //   * cascade_jog_stop() 只寫在共用的 else 裡，而那個 else 被 R1/R2 搶走，所以
+    //     intake 一接手，點動狀態就再也交還不回去。
+    // 拆成兩條鏈之後，兩個機構每一圈都會各自被判斷一次。
+
     //intake
     if(master.get_digital(DIGITAL_R1)){
       intake.move(127);
@@ -959,12 +982,21 @@ void Drive::control_arcade(){
     else if(master.get_digital(DIGITAL_R2)){
       intake.move(-127);
     }
-    else if (master.get_digital(DIGITAL_L1)){
+    else{
+      intake.move(0);
+    }
+
+    //cascade
+    if(master.get_digital(DIGITAL_L1)){
       // L1 = jog up, unchanged: same button, same voltage, same limit check.
       // cascade_jog() just routes it through the controller (which stands
-      // aside while jogging) instead of writing to the motors here.
+      // aside while jogging) instead of writing to the motors here. The limit is
+      // ALSO enforced inside cascade_task(), so a jog cannot run past it even if
+      // this loop is starved of CPU time.
       // 中文：L1＝往上點動，行為沒變（同一顆按鍵、同樣的電壓、同樣的上限判斷）。
       // 只是改成走 cascade_jog()，點動期間控制器會讓位，不是在這裡直接寫馬達。
+      // 上限在 cascade_task() 裡「也」會再夾一次，就算這個迴圈搶不到 CPU，點動也
+      // 不會衝過上限。
       cascade_preset_active = false;
       if(cascade1.get_position() >= CASCADE_EXTEND_LIMIT_DEG || cascade2.get_position() >= CASCADE_EXTEND_LIMIT_DEG){
         cascade_jog(0);
@@ -985,7 +1017,6 @@ void Drive::control_arcade(){
       }
     }
     else{
-      intake.move(0);
       // Nobody is jogging: hand the cascade back to the PID. If a preset
       // sequence is running it holds that sequence's target; otherwise it holds
       // wherever the driver let go of L1/L2 -- which is the one thing that IS

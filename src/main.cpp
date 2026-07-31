@@ -89,10 +89,10 @@ void initialize() {
 	vexdash::watch_config("arm_kG", &ARM_KG,       "arm/pid");
 	vexdash::watch_config("arm_horizontal_deg", &ARM_HORIZONTAL_DEG, "arm/pid");
 
-	// --- vexdash: cascade (the lift on ports 7 / -2) live graph + tuning ---
+	// --- vexdash: cascade (the lift on ports 7 / -3) live graph + tuning ---
 	// The "cascade/pid" path is the v1.4 CHANNEL_DEF grouping field, so these
 	// lines land next to the cascade sliders on the dashboard.
-	// 中文：cascade（7 與 -2 那支升降）的即時圖表與調參。"cascade/pid" 是 v1.4 的
+	// 中文：cascade（7 與 -3 那支升降）的即時圖表與調參。"cascade/pid" 是 v1.4 的
 	// 分組欄位，會讓這幾條線跟 cascade 的滑桿排在一起。
 	vexdash::watch("cascade_pos",    &tele_cascade_pos,    "deg", -1, "cascade/pid");
 	vexdash::watch("cascade_target", &tele_cascade_target, "deg", -1, "cascade/pid");
@@ -122,6 +122,27 @@ void initialize() {
 	vexdash::watch_config("cascade_LV1", &CASCADE_LV1_DEG, "cascade/presets");
 	vexdash::watch_config("cascade_LV2", &CASCADE_LV2_DEG, "cascade/presets");
 	vexdash::watch_config("cascade_LV3", &CASCADE_LV3_DEG, "cascade/presets");
+
+	// --- vexdash: arm trapezoid shape (tuning build only) ---
+	// The four D-pad keys send the arm to the four EXISTING arm/presets sliders
+	// (DOWN / POS_2 / POS_3 / POS_1 -- see the key table in tune_opcontrol.cpp),
+	// so no second set of position numbers is registered here: those four sliders
+	// already ARE the arm's four positions, and a duplicate set would be two
+	// places to change the same angle plus four more registry entries this build
+	// does not have room for.
+	// These three shape how the arm gets there: cruise speed, ramp up, ramp down.
+	// arm_setpoint is the angle the profile is commanding right now -- graph it
+	// against arm_angle and the gap between the lines is the tracking error.
+	// 中文：四顆方向鍵送手臂去的是「已經存在的」四顆 arm/presets 滑桿（DOWN／POS_2／
+	// POS_3／POS_1，按鍵表見 tune_opcontrol.cpp），所以這裡不再登記第二套位置數字：
+	// 那四顆滑桿本來就是手臂的四個位置，再開一套等於同一個角度有兩個地方要改，而且
+	// 這一版的登記表也沒有那四格可用。
+	// 下面三顆決定「怎麼過去」：巡航速度、加速、減速。arm_setpoint 是梯形當下要求的
+	// 角度——跟 arm_angle 疊起來看，兩條線的差距就是追蹤誤差。
+	vexdash::watch_config("arm_vel", &ARM_PROFILE_VEL_DPS,  "arm/profile"); // deg/s
+	vexdash::watch_config("arm_acc", &ARM_PROFILE_ACC_DPS2, "arm/profile"); // deg/s^2
+	vexdash::watch_config("arm_dec", &ARM_PROFILE_DEC_DPS2, "arm/profile"); // deg/s^2
+	vexdash::watch("arm_setpoint", &tele_arm_setpoint, "deg", -1, "arm/profile");
 #endif
 
 	// --- vexdash: on-demand PID tests (set the target, toggle "run", watch the Graph) ---
@@ -132,6 +153,33 @@ void initialize() {
 
 	// --- vexdash: stream the port-5 motor (intake) onto the Graph: pos/rpm/temp/amp ---
 	vexdash::watch_motor("motor", intake);
+
+	// --- vexdash: the two cascade motors, separately ---
+	// The cascade channels above all come from cascade_get_position_deg(), which
+	// reads cascade1 and only falls back to cascade2 when cascade1 reports
+	// nothing. So a cascade2 that has stopped pulling -- unplugged, tripped,
+	// overheating -- is invisible: the lift just gets weak and slow ("it only
+	// moves one motor") with nothing on the dashboard saying why. Position and
+	// temperature per motor make it obvious.
+	//
+	// Four hand-picked channels rather than watch_motor()'s eight (that helper
+	// registers pos/rpm/temp/amp for EACH motor): the registry holds 64 entries
+	// in total and this build needs the room for the arm profile below. rpm on
+	// two motors bolted to the same lift adds nothing that "the two positions
+	// drifted apart" has not already said, and current is something you read off
+	// a graph afterwards -- position and temperature are what you watch live.
+	// 中文：上面那幾條 cascade 頻道全部來自 cascade_get_position_deg()，而它讀的是
+	// cascade1、只有 cascade1 讀不到才退而求其次讀 cascade2。所以 cascade2 只要不出
+	// 力（線鬆了、跳保護、過熱）就完全看不出來——升降只是變弱變慢（就是「只動一顆」
+	// 那個症狀），dashboard 上卻沒有任何線索。分開報位置與溫度就一眼看得出來。
+	// 這裡挑四條、而不是用 watch_motor 的八條（那個助手一顆馬達就登記 pos/rpm/temp/
+	// amp 四條）：登記表全部只有 64 格，下面手臂梯形要用到。兩顆鎖在同一支升降上的
+	// 馬達，rpm 能講的事情「兩顆位置拉開」已經講完了；電流是事後看圖用的——現場要盯
+	// 的是位置和溫度。
+	vexdash::watch("cascade1_pos",  &tele_cascade1_pos,  "deg", -1, "cascade/pid");
+	vexdash::watch("cascade2_pos",  &tele_cascade2_pos,  "deg", -1, "cascade/pid");
+	vexdash::watch("cascade1_temp", &tele_cascade1_temp, "C",   -1, "cascade/pid");
+	vexdash::watch("cascade2_temp", &tele_cascade2_temp, "C",   -1, "cascade/pid");
 
 	// --- vexdash: Device Map -- sensors section ---
 	vexdash::declare_device(distance_sensorL.get_port(), vexdash::DeviceType::kDistance, "distance_L");
@@ -176,10 +224,11 @@ void initialize() {
 	vexdash::declare_device(vexdash::adi_port('C'), vexdash::DeviceType::kUnknown, "toggle");
 	vexdash::declare_device(vexdash::adi_port('D'), vexdash::DeviceType::kUnknown, "cascade_limit");
 
-	// Start vexdash over the ESP32 Smart Port bridge (port 11 @ 115200 baud).
+	// Start vexdash over the ESP32 Smart Port bridge (port 11 @ 921600 baud).
 	// The ESP32 relays telemetry to the dashboard over WiFi (ws://192.168.4.1).
-	// NOTE: port 11 is also used by distance_sensorL in robot-config.cpp — a
-	// smart port can host only one device, so move one of them if both are wired.
+	// NOTE: smart port 11 is the ESP32 bridge and nothing else — distance_sensorL
+	// is on port 2 (see robot-config.cpp), so there is no smart-port conflict.
+	// 中文：智慧埠 11 就是 ESP32 橋接埠，沒有別的裝置（distance_sensorL 在埠 2）。
 	// Smart Port path leaves stdout free (printf still works); HUD off by default.
 	// 921600 must match the ESP32 bridge firmware exactly (official firmware
 	// moved off 115200 on 2026-07-25 for headroom). If the dashboard suddenly

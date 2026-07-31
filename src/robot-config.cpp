@@ -1,8 +1,24 @@
 #include "main.h"
 
 IMU inertial(17);
-Rotation fwd_tracker(2); // I just put a random number here but we dont have a forward tracker
-Rotation sideways_tracker(1);  // I just put a random number here but we dont have a sideways tracker
+// PLACEHOLDER TRACKERS -- the robot has neither of them. Their port numbers are
+// made up and they DO collide with real devices (port 2 = distance_sensorL,
+// port 1 = rightMiddle). That is known and harmless: the drive is configured as
+// DriveStyle::ZERO_TRACKER below, so Drive never reads either object, and a
+// Rotation constructor does not reconfigure a port that already holds a motor or
+// a distance sensor -- it just never returns valid data, which nobody asks for.
+// They are also deliberately left out of the vexdash device map in main.cpp.
+// Do NOT "fix" the ports to free numbers: give them real unused ports and the
+// next person will believe the robot has trackers. Delete them instead, if ever.
+// 中文：這兩顆是假的 tracker，車上根本沒有。埠號是隨手填的，而且真的跟現有裝置撞到
+// （埠 2＝distance_sensorL、埠 1＝rightMiddle）。這是已知且無害的：底盤下面設定成
+// DriveStyle::ZERO_TRACKER，Drive 從頭到尾不會讀這兩個物件；而 Rotation 的建構也不
+// 會把已經插著馬達／距離感測器的埠改掉，它只是永遠讀不到有效值——反正沒人讀。
+// main.cpp 的 vexdash 孔位圖也故意不宣告它們。
+// 不要把埠號「修」成沒人用的號碼：改成合法空埠，下一個人就會以為車上真的有 tracker。
+// 真要處理就是整個刪掉。
+Rotation fwd_tracker(2);       // fake: no forward tracker on this robot 中文：假的，沒有前向 tracker
+Rotation sideways_tracker(1);  // fake: no sideways tracker on this robot 中文：假的，沒有側向 tracker
 
 // 66799T Worlds
 // negative port number means reversed (there is no separate "reversed" constructor argument)
@@ -54,7 +70,20 @@ Drive chassis(
     // External ratio, must be in decimal, in the format of input teeth/output teeth.
     // If your motor has an 84-tooth gear and your wheel has a 60-tooth gear, this value will be 1.4.
     // If the motor drives the wheel directly, this value is 1:
-    48/36, // Changing this from 48/36 to 36/48 is wrong! 36/48 makes odom (x and y values) increment way too slowly. TODO: Figure out why this is.
+    // 48/36 is INTEGER division: both are ints, so this argument is literally 1
+    // -- not 1.333. That is not a bug to fix, it is the number every autonomous
+    // distance on this robot was tuned against. (And it explains the old TODO:
+    // 36/48 is integer division too and evaluates to 0, which zeroes the odom
+    // update entirely -- x/y stop moving, not "increment too slowly".) Writing
+    // 48.0/36.0 would change the ratio to 1.333 and every auton drive_distance()
+    // would overshoot by a third, so leave it alone unless you are prepared to
+    // re-tune the whole auton.
+    // 中文：48/36 是「整數除法」，兩邊都是 int，所以這個參數實際上就是 1，不是
+    // 1.333。這不是待修的 bug，是全部自走距離都照著它調出來的既有值。（順帶解答舊
+    // 的 TODO：36/48 同樣是整數除法、結果是 0，odom 會完全不動，不是「跑太慢」。）
+    // 寫成 48.0/36.0 會讓比值變成 1.333，每一段自走 drive_distance() 都會多跑三分
+    // 之一——除非你準備把整套自走重調，否則不要動它。
+    48/36,
 
     // Gyro scale, this is what your gyro reads when you spin the robot 360 degrees.
     // For most cases 360 will do fine here, but this scale factor can be very helpful when precision is necessary.

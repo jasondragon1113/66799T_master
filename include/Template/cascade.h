@@ -70,6 +70,22 @@ extern float tele_cascade_error;   // target - current (motor deg)
 extern float tele_cascade_output;  // what is being sent to both motors
 extern float tele_cascade_ff;      // the gravity feedforward part of that output
 
+// Per-motor telemetry. Everything above reports the lift as ONE thing (position
+// comes from cascade_get_position_deg(), which reads cascade1 and only falls
+// back to cascade2 if cascade1 says nothing), so a cascade2 that has stopped
+// pulling is invisible: the lift just gets weak and slow -- the "it only moves
+// one motor" symptom -- with nothing on the dashboard saying why. These four
+// channels make it obvious: the two positions drift apart, or one temperature
+// climbs on its own.
+// 中文：上面那些是把升降當成「一個東西」報的（位置來自 cascade_get_position_deg()，
+// 它讀 cascade1、只有讀不到才退去讀 cascade2），所以 cascade2 不出力的時候完全看不
+// 出來——升降只是變弱變慢，就是「只動一顆」那個症狀，dashboard 上卻沒有線索。
+// 這四條線就直接看得出來：兩顆位置拉開，或某一顆溫度自己往上爬。
+extern float tele_cascade1_pos;    // cascade1 position (motor deg)
+extern float tele_cascade2_pos;    // cascade2 position (motor deg)
+extern float tele_cascade1_temp;   // cascade1 temperature (C)
+extern float tele_cascade2_temp;   // cascade2 temperature (C)
+
 // --- API -------------------------------------------------------------------
 
 // Where the controller should hold the cascade, in motor degrees. Clamped into

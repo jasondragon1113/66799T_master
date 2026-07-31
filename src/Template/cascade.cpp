@@ -31,6 +31,14 @@ float tele_cascade_error = 0;
 float tele_cascade_output = 0;
 float tele_cascade_ff = 0;
 
+// Per-motor telemetry -- see cascade.h for why both motors are reported
+// separately. Sampled by cascade_task() below.
+// 中文：兩顆馬達分開上報的遙測，理由見 cascade.h。由下面的 cascade_task() 取樣。
+float tele_cascade1_pos = 0;
+float tele_cascade2_pos = 0;
+float tele_cascade1_temp = 0;
+float tele_cascade2_temp = 0;
+
 // Where the controller is trying to hold the cascade, in motor degrees.
 // 中文：控制器現在想把 cascade 停在哪裡（馬達度數）。
 static float cascade_target_deg = 0;
@@ -56,6 +64,14 @@ static float cascade_last_good_deg = 0;
 static PID cascade_pid(0, CASCADE_KP, CASCADE_KI, CASCADE_KD, CASCADE_STARTI);
 
 void cascade_set_target(float deg){
+  // Anyone commanding a position is taking the lift back from the driver, so the
+  // jog override ends here as well. Without this a jog that was left switched on
+  // (the old button chain could do exactly that) would swallow every preset:
+  // the task's jog branch runs first and never looks at the target.
+  // 中文：只要有人下「去這個位置」的命令，就等於把升降從駕駛手上收回來，所以順手把
+  // 點動狀態關掉。不關的話，一個沒被關掉的點動（舊的按鍵鏈就會留下這種狀態）會把之後
+  // 每一個預設動作都吃掉——task 裡點動那一支排在前面，根本不會去看目標值。
+  cascade_jog_stop();
   cascade_target_deg = clamp(deg, 0.0f, CASCADE_EXTEND_LIMIT_DEG);
 }
 
@@ -105,6 +121,14 @@ void cascade_control_set_enabled(bool enabled){
   if(enabled && !cascade_enabled){
     cascade_notify_tare();
   }
+  // Parking the controller (disabled(), autonomous()) also cancels any jog left
+  // switched on, so a driver who was holding L1 when the field cut the robot off
+  // does not have that voltage waiting to resume the moment control comes back.
+  // 中文：把控制器停用（disabled()、autonomous()）的時候，順手把還開著的點動取消。
+  // 不然「場地斷電那一刻剛好壓著 L1」的電壓會一直留著，等控制恢復就直接續開。
+  if(!enabled){
+    cascade_jog_stop();
+  }
   cascade_enabled = enabled;
 }
 
@@ -117,8 +141,37 @@ void cascade_notify_tare(){
   cascade_pid.previous_error = 0;
 }
 
+// Sample both motors for the dashboard. Positions every cycle (they are cheap
+// and a divergence between them is the whole point); temperature only a few
+// times a second, because it is a slow-moving number and every read is another
+// smart-port round trip.
+// 中文：把兩顆馬達的狀態取樣給 dashboard。位置每圈都讀（很便宜，而且「兩顆差多少」
+// 正是重點）；溫度一秒讀幾次就好——它本來就變得慢，而每讀一次就是一趟智慧埠來回。
+static void cascade_sample_motors(){
+  static int temp_divider = 0;
+  double p1 = cascade1.get_position();
+  double p2 = cascade2.get_position();
+  if(std::isfinite(p1)) tele_cascade1_pos = (float)p1;
+  if(std::isfinite(p2)) tele_cascade2_pos = (float)p2;
+
+  if(++temp_divider >= 25){ // 25 * 10ms = every 250 ms 中文：250ms 一次
+    temp_divider = 0;
+    double t1 = cascade1.get_temperature();
+    double t2 = cascade2.get_temperature();
+    if(std::isfinite(t1)) tele_cascade1_temp = (float)t1;
+    if(std::isfinite(t2)) tele_cascade2_temp = (float)t2;
+  }
+}
+
 void cascade_task(){
   while(true){
+    // Runs before the enabled check below, so the two motors are still being
+    // watched during autonomous and while the controller is parked -- exactly
+    // when a motor that has dropped out is hardest to notice by feel.
+    // 中文：放在下面「有沒有啟用」的判斷之前，所以自走期間、控制器被停用期間也照樣
+    // 在盯這兩顆馬達——那正是「哪一顆掉了」最難用手感察覺的時候。
+    cascade_sample_motors();
+
     // Asleep: do not write to the motors at all. Whoever else is driving them
     // (an auton move_absolute(), say) is left completely alone.
     // 中文：睡著的時候一個字都不寫給馬達，讓別人（例如自走的 move_absolute()）自
@@ -147,16 +200,29 @@ void cascade_task(){
       // Driver has the button down. The PID steps aside and the target follows
       // the lift, so letting go holds it exactly where it stopped.
       // 中文：駕駛正壓著按鍵。PID 讓位，目標跟著升降跑，放開就停在那一格。
-      cascade_target_deg = position;
+      cascade_target_deg = clamp(position, 0.0f, CASCADE_EXTEND_LIMIT_DEG);
       cascade_notify_tare();  // no windup while the driver is in charge 中文：駕駛開的時候不要累積積分
 
-      cascade1.move(cascade_jog_voltage);
-      cascade2.move(cascade_jog_voltage);
+      // Travel limits apply to the JOG path too. They used to be checked only by
+      // the caller (control_arcade) and only by the PID branch below, so any loop
+      // that skipped the L1/L2 branch left a stale jog voltage running with
+      // nothing stopping it at the ends of travel. Enforcing it here means the
+      // limit holds no matter who called cascade_jog() or how they got distracted.
+      // 中文：行程上下限對「點動」這條路徑也要生效。以前只有呼叫端（control_arcade）
+      // 和下面 PID 那條在夾，所以只要有哪一圈沒走到 L1/L2 那支，殘留的點動電壓就會
+      // 一路開下去、到底了也沒人喊停。改成在這裡強制夾，不管是誰呼叫 cascade_jog()、
+      // 中途被什麼打斷，上下限都一定成立。
+      float jog_voltage = cascade_jog_voltage;
+      if(jog_voltage > 0 && position >= CASCADE_EXTEND_LIMIT_DEG) jog_voltage = 0;
+      if(jog_voltage < 0 && position <= 0) jog_voltage = 0;
 
-      tele_cascade_target = position;
+      cascade1.move(jog_voltage);
+      cascade2.move(jog_voltage);
+
+      tele_cascade_target = cascade_target_deg;
       tele_cascade_error = 0;
       tele_cascade_ff = 0;
-      tele_cascade_output = cascade_jog_voltage;
+      tele_cascade_output = jog_voltage;
       cascade_settled = false;
       delay(10);
       continue;

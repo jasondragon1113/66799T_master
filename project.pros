@@ -636,8 +636,8 @@
     },
     "upload_options": {
       "description": "67",
-      "icon": "pizza",
-      "slot": 1
+      "icon": "power",
+      "slot": 2
     },
     "use_early_access": false
   }

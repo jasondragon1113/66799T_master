@@ -109,4 +109,49 @@ void start_arm_task();
 // 功能：把手臂鎖在「現在這個角度」，讓調參程式的中止鍵能把手臂停在原地，而不是
 // 讓它繼續跑到 preset。下一次呼叫 arm_set_position() 就自動解除。
 void arm_hold_here();
+
+// --- trapezoidal motion profile (tuning build only) -------------------------
+//
+// arm_move_profiled() sends the arm to the same presets arm_set_position()
+// does, but the angle handed to the PID is walked there along an
+// accelerate / cruise / decelerate ramp instead of jumping straight to the end.
+// Only the tuning program's four D-pad position keys use it; every existing
+// caller still goes through arm_set_position() and is unaffected -- and
+// arm_set_position() cancels a profile in flight, so the two can never fight.
+// 中文：arm_move_profiled() 送手臂去的位置跟 arm_set_position() 完全一樣，差別在
+// 「餵給 PID 的角度」是沿著加速→等速→減速的斜坡走過去，不是一步跳到終點。只有調參
+// 版的四顆方向鍵會用它；其他既有呼叫者一律還是走 arm_set_position()，行為不變——而且
+// arm_set_position() 會取消還在跑的梯形，兩邊不可能打架。
+//
+// The shape is three dashboard sliders ("arm/profile" group). Tune them AFTER
+// the gains are sane: the profile decides how fast the arm is ASKED to move,
+// the gains decide how well it obeys.
+// 中文：形狀是 dashboard 上三顆滑桿（arm/profile 群組）。等增益調好再調它們：梯形
+// 決定「叫手臂跑多快」，增益決定「它跟得多好」。
+extern float ARM_PROFILE_VEL_DPS;   // cruise speed 巡航速度 (arm deg/s)
+extern float ARM_PROFILE_ACC_DPS2;  // acceleration 加速度 (arm deg/s^2)
+extern float ARM_PROFILE_DEC_DPS2;  // deceleration 減速度 (arm deg/s^2)
+
+// The angle the profile is commanding right now -- graph it against arm_angle,
+// the gap between the two lines is the tracking error.
+// 中文：梯形當下要求的角度。跟 arm_angle 疊起來看，兩條線的差距就是追蹤誤差。
+extern float tele_arm_setpoint;
+
+void arm_move_profiled(ArmPosition pos);
+
+// True while the trapezoid is still walking the commanded angle to the goal.
+// 中文：梯形還在把命令角度往終點走的期間為 true。
+bool arm_profile_running();
+
+// True once a profiled move has been GIVEN UP ON because the arm could not keep
+// up (jammed, or the gains cannot carry it). By then the arm has already been
+// parked on its own current angle, so nothing is being pushed -- the flag exists
+// so the tuning program can say so on the controller instead of leaving a move
+// silently unfinished. Cleared by arm_hold_here() (which the abort path calls)
+// and by the next arm_move_profiled().
+// 中文：某次梯形動作因為手臂跟不上（卡住，或增益根本拉不動）而被「放棄」之後為 true。
+// 那個時候手臂已經被停在自己現在的角度了，沒有在頂任何東西——這個旗標只是要讓調參程式
+// 能在遙控器上講一聲，而不是讓一次動作無聲無息地沒下文。arm_hold_here()（中止流程會
+// 呼叫它）與下一次 arm_move_profiled() 都會把它清掉。
+bool arm_profile_stalled();
 #endif

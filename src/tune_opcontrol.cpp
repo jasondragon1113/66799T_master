@@ -28,13 +28,30 @@
 //   X     滑軌到 LEVEL2      tune_cascade_goto(CASCADE_LV2_DEG，預設 1000)
 //   A     滑軌到 LEVEL3      tune_cascade_goto(CASCADE_LV3_DEG，預設 2000)
 //         （四段高度都是 dashboard 滑桿 cascade/presets 群組，可線上調）
-//   UP    手臂抬到 POS_2     arm_set_position(ArmPosition::POS_2)
-//   DOWN  手臂回 DOWN        arm_set_position(ArmPosition::DOWN)
+//   ── 手臂四位置（方向鍵，走梯形軌跡）──────────────────────────────
+//   UP    手臂到 POS_1       最高（預設 283°）
+//   RIGHT 手臂到 POS_3       高工作位（預設 265°）
+//   LEFT  手臂到 POS_2       低工作位（預設 160°）
+//   DOWN  手臂到 DOWN        收起（預設 0°）
+//         （四個角度就是既有的 arm/presets 四顆滑桿 DOWN／POS_2／POS_3／POS_1，
+//          在 dashboard 上直接拉；沒有另外開一套「arm_POS0~3」，那會變成同一個
+//          角度有兩個地方要改，登記表也塞不下——詳見 main.cpp 的說明）
+//         這四顆走 arm_move_profiled()：命令角度沿「加速→等速→減速」的梯形走，
+//         形狀由 arm/profile 的 arm_vel／arm_acc／arm_dec 三顆滑桿決定。
+//         其他所有手臂路徑（駕駛版的 RIGHT/LEFT 預設動作、自走）照舊直達，沒變。
 //   左搖桿 Y／右搖桿 X       正常方向盤式駕駛（沒有測試動作在跑的時候才有效），
 //                            用來把車開回起點，不必用手搬
 //
 // 中止：**動作進行中按任何一顆按鍵**（同一顆也算）就中止——遙控器震一下、
 // 底盤電壓歸零、滑軌／手臂就地停住。搖桿大幅推動（超過 25／127）也會中止。
+//
+// 方向鍵拿去當手臂鍵之後，「任意鍵中止」還在嗎？在，而且一個字都沒改：
+// 「有測試在跑」的分支排在「閒置時按鍵啟動測試」之前，任何一顆新按下的鍵——包含
+// 這四顆方向鍵——在那個分支就被吃掉當成中止，根本走不到啟動測試那一段。所以：
+//   測試進行中按方向鍵 ＝ 純中止，手臂不會動
+//   閒置時按方向鍵     ＝ 手臂去該位置
+// 這跟滑軌 B/Y/X/A 是同一套規則（正在跑的先取消，要再下一個命令就再按一次），
+// 遙控器螢幕第三行也會照狀態切換：閒置顯示 UDLR=ARM POS，測試中顯示 ANY KEY=ABORT。
 //
 // ---------------------------------------------------------------------------
 // 機構保護：跟駕駛版同一套
@@ -49,16 +66,27 @@
 //     用的是 Template/cascade.h 那一份共用常數，沒有另抄數字
 //
 // ---------------------------------------------------------------------------
-// 為什麼手臂是 POS_2／DOWN，不是教練說的 120°／10°
+// 手臂四個位置的角度是哪來的
 // ---------------------------------------------------------------------------
-// 手臂走既有的 arm_set_position/POS 慣例，而現有的 preset 只有四個值：
-// DOWN=0°、POS_2=160°、POS_3=265°、POS_1=283°（見 src/Template/arm.cpp）。
-// 120° 與 10° 都不在裡面，所以照規格取「最接近的現值」：
-//   120° → POS_2（160°，四個裡最接近）
-//    10° → DOWN（0°，四個裡最接近）
-// 要正好 120／10 的話不用改程式：這四個數字本身就是 dashboard 的滑桿
-// （arm/presets 群組的 POS_2／DOWN），在 dashboard 上把 POS_2 拉到 120、
-// DOWN 拉到 10，這兩顆按鍵就會跑到 120／10。
+// 手臂走既有的 arm_set_position/POS 慣例，現有的四個 preset 就是四個位置：
+// DOWN=0°、POS_2=160°、POS_3=265°、POS_1=283°（見 src/Template/arm.cpp），
+// 由低到高剛好對上 DOWN／LEFT／RIGHT／UP 四顆方向鍵。
+// 要別的角度（例如教練要的 120°／10°）不用改程式：這四個數字本身就是 dashboard
+// 的滑桿（arm/presets 群組），在 dashboard 上把 POS_2 拉到 120、DOWN 拉到 10，
+// 那兩顆按鍵就會跑到 120／10。
+//
+// ---------------------------------------------------------------------------
+// 梯形怎麼調
+// ---------------------------------------------------------------------------
+// 順序：先把增益調到「跟得上」，再調梯形決定「要它跑多快」。
+//   1. arm_vel 先放小（例如 60 deg/s），按一顆方向鍵，看 Graph 上的
+//      arm_setpoint（梯形要求的角度）與 arm_angle（實際角度）。
+//   2. 兩條線幾乎重疊＝跟得上，可以把 arm_vel／arm_acc 往上加。
+//   3. 兩條線分開＝手臂追不上梯形。這時候該加的是增益（或 arm_kG），不是把梯形
+//      拉更快——梯形拉快只會讓差距更大。
+//   4. 停下來會晃就把 arm_dec 調小（減速更早開始）。
+// 手臂落後超過 25° 時梯形會自己停住不再往前（arm.cpp 的 ARM_PROFILE_MAX_LAG_DEG），
+// 所以卡住的時候 PID 不會對著一個一路跑掉的命令角度死推。
 //
 // ---------------------------------------------------------------------------
 // 增益怎麼吃到 dashboard 的值
@@ -154,6 +182,18 @@ constexpr int TUNE_ABORT_WAIT_MARGIN_MS = 1000;
 constexpr int TUNE_ARM_TIMEOUT_MS = 5000;
 constexpr int TUNE_CASCADE_TIMEOUT_MS = 6000;
 
+// Backstop for a profiled arm move. TUNE_ARM_TIMEOUT_MS above only measures the
+// PID settling AFTER the trapezoid has finished (a slow arm_vel can take longer
+// than 5 s to cross the whole travel, and that is not a fault). This one is
+// measured from the button press and covers the case the other cannot see: a
+// profile frozen by the lag guard because the arm is jammed, which would
+// otherwise sit there "running" until someone noticed.
+// 中文：走梯形的手臂動作的最後一道保險。上面的 TUNE_ARM_TIMEOUT_MS 只計算「梯形走完
+// 之後 PID 收尾」那段（arm_vel 調慢的話，走完整支行程超過 5 秒是正常的，不是故障）。
+// 這一個是從按下按鍵開始算，補的是另一個看不到的情況：手臂卡住、梯形被落後保護凍住，
+// 不然它會一直掛在「測試進行中」等人發現。
+constexpr int TUNE_ARM_TOTAL_TIMEOUT_MS = 20000;
+
 // Stick deflection that counts as "the driver wants the robot back".
 constexpr int TUNE_STICK_ABORT = 25;
 constexpr int TUNE_STICK_DEADBAND = 5;
@@ -166,6 +206,11 @@ enum class ChassisMove { NONE, DRIVE_FWD, DRIVE_BACK, TURN_LEFT, TURN_RIGHT };
 
 ActiveTest active_test = ActiveTest::NONE;
 std::uint32_t test_started_ms = 0;
+// When the arm key was pressed, kept separately because test_started_ms is held
+// at "now" while a trapezoid runs (see the ARM branch of the loop).
+// 中文：手臂鍵是什麼時候按的。要另外記，因為梯形在跑的時候 test_started_ms 會一直
+// 被押在「現在」（見迴圈裡的 ARM 分支）。
+std::uint32_t arm_test_started_ms = 0;
 
 // Handshake with the worker task below. Plain volatile bools: one writer each,
 // 10 ms polling, nothing that a race could make unsafe (the worst case is one
@@ -486,6 +531,19 @@ void request_chassis_move(ChassisMove move, const char* label){
   screen_set(1, label);
 }
 
+// Send the arm to one of its four presets along the trapezoid, and register it
+// as the running test so the abort path and the DONE/TIMEOUT logic already in
+// the loop apply to it unchanged -- exactly like the cascade level keys.
+// 中文：把手臂沿梯形送到四個預設位置之一，並登記成「正在跑的測試」，這樣迴圈裡
+// 既有的中止流程、到位／逾時判斷就原封不動地套用在它身上——跟滑軌四段鍵一模一樣。
+void tune_arm_goto(ArmPosition pos, const char* label){
+  arm_move_profiled(pos);
+  active_test = ActiveTest::ARM;
+  test_started_ms = pros::millis();
+  arm_test_started_ms = test_started_ms;
+  screen_set(1, label);
+}
+
 } // namespace
 
 void tune_opcontrol(){
@@ -521,7 +579,16 @@ void tune_opcontrol(){
   tune_master.rumble(". .");
   screen_set(0, "== PID TUNE ==");
   screen_set(1, "READY");
-  screen_set(2, "L1F L2B R1L R2R");
+  // Line 2 is now a live hint, rewritten every pass of the loop below: it says
+  // what the D-pad does when idle and what ANY key does while a test runs. That
+  // matters more on a 15-character screen than the old static chassis-key list
+  // (which is in the key table at the top of this file), because the D-pad is
+  // the one place where the same button means two different things.
+  // 中文：第三行改成會跟著狀態變的提示，由下面的迴圈每圈重寫：閒置時講方向鍵是什麼、
+  // 測試進行中講「按任何鍵＝中止」。在一行只有 15 個字的螢幕上，這比原本那串固定的
+  // 底盤按鍵表更該佔位置（底盤按鍵表在本檔開頭的按鍵表裡），因為方向鍵是唯一一個
+  // 「同一顆鍵在兩種狀態下意思不同」的地方。
+  screen_set(2, "UDLR=ARM POS");
 
   // Runs BEFORE the button loop, i.e. before any test can be started, so the
   // abort path can rely on both timeouts being finite. See TUNE_MIN_*_TIMEOUT_MS.
@@ -536,6 +603,13 @@ void tune_opcontrol(){
 
   while(true){
     screen_pump();
+
+    // Live hint line. screen_set() only records what SHOULD be on screen and
+    // screen_pump() pushes a line only when it actually changed, so rewriting
+    // it every 10 ms costs nothing on the wire.
+    // 中文：狀態提示行。screen_set() 只是記下「應該顯示什麼」，screen_pump() 只在
+    // 真的變了才送出去，所以每 10ms 重寫一次完全不佔傳輸。
+    screen_set(2, active_test != ActiveTest::NONE ? "ANY KEY=ABORT" : "UDLR=ARM POS");
 
     // ---- competition lockout ------------------------------------------------
     if(competition_lockout()){
@@ -603,14 +677,52 @@ void tune_opcontrol(){
         }
       }
       else if(active_test == ActiveTest::ARM){
+        // The profile gave up: the arm could not keep up and has ALREADY been
+        // parked on its own angle by arm.cpp, so nothing is being pushed. Report
+        // it and end the test right now. This is the fast exit that stops a jam
+        // sitting there until the 20 s backstop -- with it in place the backstop
+        // really is a last resort rather than the normal way out of a stall.
+        // 中文：梯形放棄了——手臂跟不上，而且 arm.cpp 已經把它停在自己的角度上，沒有
+        // 在頂任何東西。這裡立刻回報並結束測試。有了這條快速出口，卡住就不用等到 20 秒
+        // 的總逾時；那個總逾時因此退回成真正的「最後一道」保險。
+        if(arm_profile_stalled()){
+          abort_active_test(true);   // arm_hold_here() inside clears the flag
+          screen_set(1, "ARM STALL");
+          pros::delay(TUNE_LOOP_MS);
+          continue;
+        }
+
+        // While the trapezoid is still walking the commanded angle, the arm is
+        // doing exactly what it was told, so the settle timeout must not be
+        // counting: a slow arm_vel can legitimately take longer than
+        // TUNE_ARM_TIMEOUT_MS to cross the whole travel. Holding the clock at
+        // "now" pauses that timeout, and the 30 ms staleness guard below then
+        // starts from the moment the profile hands the arm over to the PID --
+        // which is exactly what it is there for.
+        // 中文：梯形還在走的時候，手臂是照著命令在做，所以收尾逾時不能在這時候計時：
+        // arm_vel 調慢的話，走完整支行程本來就可能比 TUNE_ARM_TIMEOUT_MS 久。把計時
+        // 起點一直押在「現在」＝把逾時暫停；而下面那個 30ms 的保護就會從「梯形交棒給
+        // PID」的那一刻開始算——這正是它存在的目的。
+        if(arm_profile_running()){
+          test_started_ms = pros::millis();
+          elapsed = 0;
+        }
+
         // arm_settled is recomputed every 10 ms and stays stale (true for the
-        // PREVIOUS target) for a moment after arm_set_position() -- same 30 ms
-        // latency the preset sequences in drive.cpp allow for.
+        // PREVIOUS target) for a moment after a new arm command -- same 30 ms
+        // latency the preset sequences in drive.cpp allow for. It is measured
+        // against the DESTINATION, not the moving profile point (see arm.cpp),
+        // so it cannot go true in the middle of a profiled move.
+        // 中文：arm_settled 每 10ms 重算一次，新命令剛下的瞬間它還是「上一個目標」的
+        // 答案，所以等 30ms——跟 drive.cpp 的預設動作同一個數字。它是拿「終點」量的、
+        // 不是拿梯形移動中的那一點量的（見 arm.cpp），所以不會在動作中途變成 true。
         if(elapsed > 30 && arm_settled){
           active_test = ActiveTest::NONE;
           screen_set(1, "ARM DONE");
         }
-        else if(elapsed > (std::uint32_t)TUNE_ARM_TIMEOUT_MS){
+        else if(elapsed > (std::uint32_t)TUNE_ARM_TIMEOUT_MS ||
+                pros::millis() - arm_test_started_ms >
+                    (std::uint32_t)TUNE_ARM_TOTAL_TIMEOUT_MS){
           abort_active_test(true);
           screen_set(1, "ARM TIMEOUT");
         }
@@ -660,25 +772,23 @@ void tune_opcontrol(){
         test_started_ms = pros::millis();
         screen_set(1, "CASC LV3");
       }
-      else if(b_up){
-        // 120 deg requested -> POS_2 is the closest existing preset (see the
-        // header comment). Drag POS_2 to 120 on the dashboard for an exact 120.
-        arm_set_position(ArmPosition::POS_2);
-        active_test = ActiveTest::ARM;
-        test_started_ms = pros::millis();
-        screen_set(1, "ARM POS_2");
-      }
-      else if(b_down){
-        // 10 deg requested -> DOWN is the closest existing preset.
-        arm_set_position(ArmPosition::DOWN);
-        active_test = ActiveTest::ARM;
-        test_started_ms = pros::millis();
-        screen_set(1, "ARM DOWN");
-      }
-      // LEFT / RIGHT are not test buttons here. They still counted as
-      // "any button" above, so they work as abort keys and do nothing else.
-      // 中文：左／右在這一版不是測試鍵。它們仍然算在「任何按鍵」裡，
-      // 所以只當中止鍵用，其他什麼都不做。
+      // The four arm positions, low to high: DOWN < POS_2 < POS_3 < POS_1,
+      // laid out on the D-pad the way the arm actually moves (DOWN key = down).
+      // The angles are the arm/presets sliders, so they are tuned on the
+      // dashboard, not here. All four go through the trapezoid.
+      // 中文：手臂四個位置由低到高：DOWN < POS_2 < POS_3 < POS_1，按鍵位置照著手臂
+      // 實際的高低擺（往下的鍵＝往下）。角度是 arm/presets 那四顆滑桿，在 dashboard
+      // 上調、不寫在這裡。四顆都走梯形。
+      else if(b_up)    tune_arm_goto(ArmPosition::POS_1, "ARM UP POS_1");
+      else if(b_right) tune_arm_goto(ArmPosition::POS_3, "ARM POS_3");
+      else if(b_left)  tune_arm_goto(ArmPosition::POS_2, "ARM POS_2");
+      else if(b_down)  tune_arm_goto(ArmPosition::DOWN,  "ARM DOWN");
+      // Reaching this point at all means no test was running (if one had been,
+      // the branch above would have aborted it and skipped the rest of the
+      // loop), which is exactly why the D-pad can be both an abort key and a
+      // position key without the two ever colliding.
+      // 中文：能走到這一段就代表「沒有測試在跑」（有的話上面那個分支早就 continue
+      // 掉了）。這正是方向鍵可以同時當中止鍵與位置鍵、而兩者永遠不會撞在一起的原因。
     }
     else {
       // ---- plain arcade driving, so the robot can be repositioned ----------
