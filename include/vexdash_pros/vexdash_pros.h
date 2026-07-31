@@ -92,7 +92,7 @@ inline Session& quick_start() { return init_usb(); }
 //
 // 只可登記全域 / static / 生命週期夠長的變數（同現況 callback 抓 &g_kp 的約束）。
 // 型別支援 double / float / int32_t / bool，由多載自動推導，使用者不碰 ValueType。
-// 上限與超額行為：登記表固定 64 項（watch_motor 一次佔 4 項）；超過上限、名字無效
+// 上限與超額行為：登記表固定 96 項（watch_motor 一次佔 4 項）；超過上限、名字無效
 // （空字串／超過 kMaxNameLen）或傳入 nullptr 的登記會失敗，透過下方的 bool 回傳值
 // 告知（見 2026-07-19 前置修繕 FIX-2）——**呼叫端可以忽略回傳值**（如 quick-start
 // 範例那樣直接當一行敘述寫，向後相容零改動），但想在啟動時抓出「表滿/打錯名字」
@@ -109,7 +109,7 @@ inline Session& quick_start() { return init_usb(); }
 //   watch_config("kP", &kP, "drive/pid");            // 參數屬於底盤 PID
 //   watch("error", &error, "rpm", -1, "drive/pid");  // 這條圖表線也是（明講，不用猜）
 //
-// 回傳 true＝已登記／已覆蓋既有同名項；false＝表滿（64 項已滿）、名字無效（空字串
+// 回傳 true＝已登記／已覆蓋既有同名項；false＝表滿（96 項已滿）、名字無效（空字串
 // 或超過 63 bytes）、或 value 為 nullptr。
 bool watch(const char* name, double* value, const char* unit = "", int device_port = -1,
            const char* path = "");

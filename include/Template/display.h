@@ -32,6 +32,15 @@ extern AutonRoutine selected_auton;
 void dashboard_task();
 void start_dashboard();
 void dashboard_handle_touch();
+// --- odometry pose telemetry (defined in display.cpp, published every 25 ms) ---
+// JAR units: inches / degrees. Registered as graph channels under "drive/pid" in
+// main.cpp; the Field panel's marker is fed separately by set_pose().
+// 中文：里程計座標遙測（定義在 display.cpp，每 25ms 更新一次）。單位照 JAR：吋與度。
+// 在 main.cpp 以 "drive/pid" 登記成圖表頻道；場地面板的圖示則是由 set_pose() 另外餵。
+extern float tele_pose_x;
+extern float tele_pose_y;
+extern float tele_pose_heading;
+
 void dashboard_draw_tab_bar();
 void dashboard_draw_motors_tab();
 void dashboard_draw_position_tab();

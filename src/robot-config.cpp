@@ -115,8 +115,28 @@ Drive chassis(
 
 void default_constants(){
     // Each constant set is in the form of (maxVoltage, kP, kI, kD, startI(, minVoltage)).
-    chassis.set_drive_constants(127, 7, 0, 12.5, 0, 0);
-    chassis.set_heading_constants(64, 1.5, 0, 8, 0); //chassis.set_heading_constants(64, 0.4, 0, 20, 0);      chassis.set_heading_constants(64, 1, 0, 2, 0);
+    //
+    // startI is the anti-windup gate: PID.cpp only accumulates the integral once
+    // |error| < startI, so it works on the last stretch into the target instead
+    // of winding up over the whole approach. A startI of 0 does NOT mean "no
+    // limit" -- it means |error| < 0, which is never true, so the I term is
+    // permanently dead however far the kI slider is dragged. Drive and heading
+    // both shipped with 0, which is why drive_kI did nothing on the dashboard.
+    // The values below are a couple of times each loop's settle window (drive
+    // settles at 1.875 in, so 2 in; heading is in degrees, so 3 deg), which is
+    // the band to stay in if these are ever re-tuned.
+    // Changing startI alone changes NO behaviour while kI is 0 (0 * anything is
+    // still 0) -- it only makes the kI slider able to do something.
+    // 中文：startI 是積分的防飽和閘：PID.cpp 只有在 |誤差| < startI 時才累積積分，讓
+    // I 項只在「最後一段」作用，不會在整段接近過程中累到爆。填 0 不是「不設限」，而是
+    // 「|誤差| < 0」＝永遠不成立＝I 項被永久關掉，kI 滑桿拉到天上也沒用。直走與朝向這
+    // 兩組原本都是 0，這就是 dashboard 上 drive_kI 沒反應的原因。下面的值取各迴路
+    // settle 窗口的兩三倍（直走 settle 是 1.875 吋 → 2 吋；朝向是角度 → 3 度），日後
+    // 要重調也請維持這個量級。
+    // 注意：在 kI 還是 0 的情況下，只改 startI 不會改變任何行為（0 乘什麼都是 0），
+    // 它只是讓 kI 滑桿「終於有作用」。
+    chassis.set_drive_constants(127, 7, 0, 12.5, 2, 0);
+    chassis.set_heading_constants(64, 1.5, 0, 8, 3); //chassis.set_heading_constants(64, 0.4, 0, 20, 0);      chassis.set_heading_constants(64, 1, 0, 2, 0);
     chassis.set_turn_constants(107, 3.2, .10583, 17.4625, 15.0); //chassis.set_turn_constants(107, 3.2, .10583, 17.4625, 15.0);
     chassis.set_swing_constants(127, 3.704166667, 0.08466667, 21.1666667, 15);
     chassis.set_wall_constants(74, 0.065, 0, 0, 0); //chassis.set_wall_constants(127, 0.529166667, 0, 0, 0);

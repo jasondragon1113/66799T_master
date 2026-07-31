@@ -1,7 +1,43 @@
 #include "main.h"
+#include "vexdash_pros/vexdash_pros.h" // set_pose() for the dashboard's Field panel
 #include <cstring>
 #include <cstdio>
 #include <cmath>
+
+// --- odometry pose, published to the dashboard -------------------------------
+// Two consumers, two shapes:
+//   * set_pose() feeds the Field panel's robot marker. It is a FIELD_OPS message,
+//     not a watch channel, so it costs ZERO registry slots -- and it is the only
+//     thing that panel reads, which is why the field was blank: nothing on this
+//     robot had ever called it.
+//   * the three channels below are for the Graph, in the units the coach thinks
+//     in (JAR's inches and degrees) rather than set_pose()'s mm/radians. They
+//     are registered with path "drive/pid" in main.cpp so they appear INSIDE the
+//     drive and turn tuning modes instead of being filtered out of them.
+// Sampled in dashboard_task() because that task runs from initialize() onwards:
+// the pose then keeps updating in teleop, in autonomous AND in the tuning
+// program -- where the robot is is not a teleop-only fact.
+// 中文：里程計座標，送給 dashboard。兩個消費者、兩種形狀：
+//   * set_pose() 餵「場地」面板上的機器人圖示。它是 FIELD_OPS 訊息、不是 watch 頻道，
+//     所以不佔任何登記格——而且那個面板只讀它，這就是場地一直空白的原因：這台車從來
+//     沒有人呼叫過它。
+//   * 下面三條頻道是給圖表用的，單位用教練腦子裡的那一套（JAR 的吋與度），不是
+//     set_pose() 的公釐與弧度。它們在 main.cpp 以 path="drive/pid" 登記，所以在底盤與
+//     轉彎的調車模式裡看得到，不會被模式過濾掉。
+// 取樣放在 dashboard_task()，因為那支 task 從 initialize() 之後就一直在跑：遙控、自走、
+// 調參版都照樣更新——「車在哪裡」不是只有遙控期才存在的事實。
+float tele_pose_x = 0;       // in
+float tele_pose_y = 0;       // in
+float tele_pose_heading = 0; // deg
+
+static void publish_pose(){
+  tele_pose_x = chassis.get_X_position();
+  tele_pose_y = chassis.get_Y_position();
+  tele_pose_heading = chassis.get_absolute_heading();
+  // JAR keeps odometry in inches and degrees; the protocol wants mm and radians.
+  // 中文：JAR 的里程計是吋與度，協定要的是公釐與弧度。
+  vexdash::set_pose(tele_pose_x * 25.4, tele_pose_y * 25.4, to_rad(tele_pose_heading));
+}
 
 uint32_t hsv_to_rgb(float h, float s, float v, float time) {
     int i = int(h / 60) % 6;
@@ -624,6 +660,12 @@ void dashboard_task(){
 
   while(true){
     dashboard_handle_touch();
+
+    // Every pass (25 ms) -- cheap: three odometry reads already kept up to date
+    // by the drive code, plus one small FIELD_OPS frame.
+    // 中文：每一圈（25ms）都送。成本很低：三個里程計讀值本來就一直在更新，再加一個
+    // 很小的 FIELD_OPS 幀。
+    publish_pose();
 
     bool tab_changed = current_tab != prev_tab;
     bool live_tick = tab_changed || (frame % 3 == 0); // ~75ms cadence for live tabs

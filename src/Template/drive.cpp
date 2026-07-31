@@ -340,9 +340,6 @@ void Drive::drive_distance(float distance, float heading, bool motion_chaining, 
     float right_voltage = drive_output-heading_output + extra_drive_voltage;
     drive_with_voltage(left_voltage, right_voltage);
 
-    // TEMP DEBUG -- remove once the slow/no-turn issue is diagnosed.
-    printf("heading: %.1f, heading_err: %.1f, drive_out: %.1f, heading_out: %.1f, L: %.1f, R: %.1f\n",
-           get_absolute_heading(), heading_error, drive_output, heading_output, left_voltage, right_voltage);
 
     delay(10);
   }

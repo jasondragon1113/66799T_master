@@ -457,6 +457,12 @@ void arm_task(){
     if(!arm_control_enabled_flag){
       armPID.accumulated_error = 0;
       armPID.previous_error = 0;
+      // ...and the first-tick seed, so the cycle control comes back on is not
+      // read as a step change from zero (PID.h). Without it, handing the arm
+      // back after a feedforward ramp fires one saturated D spike.
+      // 中文：連「第一圈的種子」也要一起重設，控制權回來的那一圈才不會被當成從 0 跳上來
+      // 的階躍（見 PID.h）。少了這行，前饋斜坡結束交還手臂的瞬間會有一記飽和的 D 尖峰。
+      armPID.first_update = true;
       tele_arm_angle = arm_get_position_deg();
       tele_arm_output = 0;
       arm_settled = false;

@@ -42,6 +42,25 @@
 //   左搖桿 Y／右搖桿 X       正常方向盤式駕駛（沒有測試動作在跑的時候才有效），
 //                            用來把車開回起點，不必用手搬
 //
+//   ── 量前饋，兩條路（都沒有按鍵，從 dashboard 觸發）────────────────
+//
+//   路 A：手動擷取 ff_capture_arm／ff_capture_cascade（切換式，建議先用這條）
+//   在 dashboard「量前饋」分頁按「開始錄資料」之前，先按這顆命令按鈕開始擷取，
+//   然後用方向鍵把手臂上上下下開幾趟（兩個方向都要跑，只跑單向擬合會被擋下來），
+//   最後再按一次同一顆按鈕結束。**結束那一下才會讓面板做擬合**，因為錄製器是看
+//   tune_seg 從非 0 變回 0 才收工的。45 秒會自己結束（dashboard 的環形緩衝約 50 秒，
+//   跑太久最早的資料會被蓋掉、變成單向資料）。
+//
+//   單位（很重要，因為擬合出來的數字是要「填進滑桿」的）：
+//     手臂：tune_pos＝rotation 感測器度數（跟 arm_angle、跟手臂 PID 用的回饋同一個）
+//           tune_vel＝度／秒（由 10ms 迴圈的位置差算出來，再過一階濾波）
+//           tune_volt＝真正寫進馬達的指令，-127~127，**跟 arm_kG 同一個刻度**
+//                      → 擬合出來的 kG 可以原封不動填進 arm_kG
+//     滑軌：tune_pos＝馬達度數、tune_vel＝度／秒、tune_volt 同上，
+//           對應 cascade_kG_bottom／cascade_kG_top 那個刻度
+//
+//   路 B：前饋斜坡測試（車子自己跑，見下）
+//
 //   ── 前饋斜坡測試（沒有按鍵，從 dashboard 觸發）────────────────────
 //   dashboard「量前饋」面板上的兩顆按鈕：ff_ramp_arm（手臂）、ff_ramp_cascade
 //   （滑軌）。按下去會先跳確認（requires_confirm），確認後車端把電壓慢慢往一個
@@ -280,6 +299,50 @@ float ff_vel = 0;
 float ff_last_pos = 0;
 std::uint32_t ff_start_ms = 0;
 std::uint32_t ff_seg_start_ms = 0;
+
+// --- manual capture -----------------------------------------------------------
+// The ramp drives the mechanism itself. Manual capture is the other half: the
+// coach moves the arm with the D-pad keys and the SAME five channels are
+// published from whatever is actually happening, so a feedforward can be fitted
+// from ordinary movement without handing the robot a raw voltage ramp.
+//
+// Why this cannot simply be "publish all the time, tune_seg = 0 when idle": the
+// dashboard's recorder (tuningFlow.ts) DISCARDS every sample whose tune_seg is 0
+// and treats a 0 -> non-0 edge as a NEW run, clearing what it had. So seg must
+// be non-zero for the whole capture -- 1 while the mechanism moves one way, 2
+// the other, holding the last non-zero value while it is stationary (a pause
+// mid-capture must not read as "the run ended") -- and 0 exactly once, at the
+// end. That single 0 is what makes the panel stop and fit. Both directions have
+// to land in ONE run, or the fit reports unidirectional data and refuses to
+// hand over a number.
+// 中文：斜坡是「自己把機構開起來」量；手動擷取是另一半：教練用方向鍵把手臂動一動，
+// 同樣那五條頻道照實把當下發生的事送出去，不必給機構灌生電壓也能擬合前饋。
+// 為什麼不能「一直送、閒置時 seg 給 0」：dashboard 的錄製器（tuningFlow.ts）會把 seg=0
+// 的樣本**整筆丟掉**，而且把 0→非 0 當成「新的一輪」並清空既有資料。所以整段擷取期間
+// seg 都必須非 0：往一邊動是 1、往另一邊是 2，靜止時沿用上一個非 0 值（中途停一下不能
+// 被當成整輪結束），而 0 只在結束時送一次——就是那一次的 0 讓面板停下來做擬合。兩個方向
+// 也必須落在同一輪裡，否則擬合會判定為單向資料、拒絕給數字。
+volatile int ff_capture_request = 0;   // 0 none, 1 arm, 2 cascade (toggle)
+FfTarget ff_capture_target = FfTarget::NONE;
+std::uint32_t ff_capture_start_ms = 0;
+float ff_capture_last_pos = 0;
+float ff_capture_vel = 0;
+std::int32_t ff_capture_seg = 1;
+
+// Below this speed the mechanism counts as stationary and seg keeps its previous
+// value instead of flapping on sensor noise around zero.
+// 中文：低於這個速度就算靜止，seg 沿用上一個值，不要被零附近的雜訊弄得跳來跳去。
+constexpr float TUNE_FF_CAPTURE_VEL_DEADBAND = 3.0f;   // deg/s
+
+// Capture stops itself after this long. The dashboard keeps 2000 samples per
+// channel; at this build's 40 Hz publish rate that is ~50 s, and a run that
+// outlives the buffer loses its OLDEST samples -- which are the first direction,
+// leaving a one-directional fit that gets refused. Stopping first means a run
+// always ends with a clean 0 and a complete data set.
+// 中文：擷取到這麼久會自己停。dashboard 每條頻道留 2000 筆，在這一版 40Hz 的發布速率下
+// 約 50 秒；跑超過就從**最舊**的開始被蓋掉，而最舊的正是第一個方向，擬合會變成單向資料
+// 而被拒絕。先停就能保證每一輪都以乾淨的 0 收尾、資料也完整。
+constexpr int TUNE_FF_CAPTURE_MAX_MS = 45000;
 
 // --- which test is running ---------------------------------------------------
 enum class ActiveTest { NONE, CHASSIS, ARM, CASCADE, FF_RAMP };
@@ -575,7 +638,109 @@ void ff_ramp_finish(){
   ff_target = FfTarget::NONE;
 }
 
+// --- manual capture: publish the same five channels from ordinary movement ---
+//
+// Units, and why they are these units: whatever the panel fits from this data is
+// a number the coach then types into a SLIDER, so pos/vel/volt have to be in the
+// same scale as that slider or the number is wrong in a way nobody can see.
+//   arm     -- pos is rotation-sensor degrees (arm_get_position_deg(), the exact
+//              feedback the arm PID runs on), vel is deg/s, volt is the command
+//              actually written to the motor: the same -127..127 scale ARM_KG is
+//              added in. So a kG fitted here can be typed into arm_kG as-is.
+//   cascade -- pos is motor degrees (cascade_get_position_deg()), vel deg/s,
+//              volt the command written to both cascade motors, which is the
+//              scale cascade_kG_bottom/top live in.
+// 中文：單位，以及為什麼是這些單位：面板從這批資料擬合出來的數字，教練接下來會**填進
+// 某一顆滑桿**，所以 pos/vel/volt 必須跟那顆滑桿同一個刻度，否則數字錯了也沒人看得出來。
+//   手臂——pos 是 rotation 感測器的度數（arm_get_position_deg()，跟手臂 PID 用的回饋
+//         完全同一個）、vel 是度/秒、volt 是真正寫進馬達的指令，也就是 ARM_KG 疊加的
+//         那個 -127~127 刻度。所以這裡擬合出來的 kG 可以原封不動填進 arm_kG。
+//   滑軌——pos 是馬達度數、vel 是度/秒、volt 是寫進兩顆滑軌馬達的指令，正是
+//         cascade_kG_bottom／top 所在的刻度。
+float ff_capture_position(){
+  return ff_capture_target == FfTarget::ARM ? arm_get_position_deg()
+                                            : cascade_get_position_deg();
+}
+
+float ff_capture_output(){
+  return ff_capture_target == FfTarget::ARM ? tele_arm_output : tele_cascade_output;
+}
+
+void ff_capture_stop(){
+  if(ff_capture_target == FfTarget::NONE) return;
+  // The one and only 0 of the run: this is the sample that tells the panel the
+  // run is over and it may fit. Everything else about the frame stays as it was,
+  // so the last line is a real measurement, not a blank.
+  // 中文：整輪唯一的那一個 0——就是這一筆告訴面板「這輪結束了，可以擬合」。這一幀其他
+  // 欄位維持原值，所以最後一行仍然是一筆真實量測，不是空白。
+  TUNE_CH_SEG = 0;
+  ff_capture_target = FfTarget::NONE;
+  tune_master.rumble(".");
+}
+
+void ff_capture_start(FfTarget target, const char* label){
+  ff_capture_target = target;
+  ff_capture_start_ms = pros::millis();
+  ff_capture_last_pos = ff_capture_position();
+  ff_capture_vel = 0;
+  // Start at 1, not 0: the recorder only starts collecting on a 0 -> non-0 edge,
+  // so the very first published sample has to already be inside a run.
+  // 中文：從 1 開始、不是 0：錄製器是看「0→非 0」才開始收，所以送出去的第一筆就必須
+  // 已經在一輪之內。
+  ff_capture_seg = 1;
+  TUNE_CH_MS = 0;
+  TUNE_CH_POS = ff_capture_last_pos;
+  TUNE_CH_VEL = 0;
+  TUNE_CH_VOLT = ff_capture_output();
+  TUNE_CH_SEG = ff_capture_seg;
+  screen_set(1, label);
+  tune_master.rumble("-");
+}
+
+// One pass of capture. Runs on EVERY loop pass, including while a D-pad preset
+// move is running -- that movement is exactly what is being measured, so capture
+// deliberately is not an ActiveTest (if it were, the first key press would abort
+// it and there would be nothing to record).
+// 中文：擷取的一圈。每一圈都會跑，包含方向鍵預設動作正在跑的時候——那個動作正是我們要
+// 量的東西。所以擷取刻意**不是**一個 ActiveTest：真做成 ActiveTest 的話，第一次按鍵就
+// 會把它中止掉，根本錄不到東西。
+void ff_capture_step(){
+  if(ff_capture_target == FfTarget::NONE) return;
+
+  const float dt = TUNE_LOOP_MS / 1000.0f;
+  const std::uint32_t now = pros::millis();
+
+  float pos = ff_capture_position();
+  float raw_vel = (pos - ff_capture_last_pos) / dt;
+  ff_capture_last_pos = pos;
+  ff_capture_vel += TUNE_FF_VEL_FILTER * (raw_vel - ff_capture_vel);
+
+  // Direction decides the leg; a stationary mechanism keeps the previous one.
+  // 中文：方向決定屬於哪一段；靜止不動就沿用上一個。
+  if(ff_capture_vel > TUNE_FF_CAPTURE_VEL_DEADBAND)       ff_capture_seg = 1;
+  else if(ff_capture_vel < -TUNE_FF_CAPTURE_VEL_DEADBAND) ff_capture_seg = 2;
+
+  TUNE_CH_MS = (double)(now - ff_capture_start_ms);
+  TUNE_CH_POS = pos;
+  TUNE_CH_VEL = ff_capture_vel;
+  TUNE_CH_VOLT = ff_capture_output();
+  TUNE_CH_SEG = ff_capture_seg;
+
+  if(now - ff_capture_start_ms > (std::uint32_t)TUNE_FF_CAPTURE_MAX_MS){
+    screen_set(1, "FF CAP FULL");
+    ff_capture_stop();
+  }
+}
+
 void ff_ramp_start(FfTarget target, const char* label){
+  // The ramp and manual capture write the same five channels, so they must never
+  // overlap -- interleaved samples from two different sources would be fitted as
+  // one run. Capture is ended properly (its closing 0 goes out) rather than
+  // silently dropped, so whatever was recorded so far is still usable.
+  // 中文：斜坡跟手動擷取寫的是同五條頻道，絕不能同時進行——兩個來源交錯的樣本會被當成
+  // 同一輪去擬合。這裡是把擷取「好好收尾」（該送的 0 有送出去），不是默默丟掉，所以已經
+  // 錄到的資料仍然可用。
+  ff_capture_stop();
   ff_target = target;
   // Take the motor away from its controller FIRST. Two writers on one motor is
   // two people steering: the ramp would be fighting the PID for every cycle and
@@ -825,6 +990,12 @@ void tune_safety_task(){
     if(pros::competition::is_disabled() || pros::competition::is_autonomous()){
       if(move_running || move_requested) abort_chassis_move();
       if(ff_target != FfTarget::NONE) ff_ramp_finish();
+      // Capture drives nothing, so this is not a safety stop -- it just closes
+      // the run properly (its single 0) instead of leaving the panel waiting
+      // forever for an end that the deleted opcontrol task can no longer send.
+      // 中文：擷取不驅動任何東西，所以這不是安全停機，只是把那一輪好好收掉（送出唯一
+      // 的那個 0），不要讓面板一直等一個「已被砍掉的 opcontrol 再也送不出來」的結束。
+      if(ff_capture_target != FfTarget::NONE) ff_capture_stop();
     }
     pros::delay(20);
   }
@@ -873,6 +1044,18 @@ void tune_ff_ramp_cascade_command(void* /*user_data*/){
   ff_request = 2;
 }
 
+// Manual capture toggles. Same handshake, same reason (a background task must
+// not start motion or reach into the tuning state machine).
+// 中文：手動擷取的開關，同一套握手、同一個理由（背景 task 不可以直接讓機器人動，也不
+// 該伸手進調參狀態機）。
+void tune_ff_capture_arm_command(void* /*user_data*/){
+  ff_capture_request = 1;
+}
+
+void tune_ff_capture_cascade_command(void* /*user_data*/){
+  ff_capture_request = 2;
+}
+
 void tune_opcontrol(){
   save_voltage_caps();
   // Teleop can start again after field control killed this task mid-abort, with
@@ -897,6 +1080,21 @@ void tune_opcontrol(){
   // 現在擺放的物理底部」歸零，再讓滑軌 PID 撐在 0。不做的話滑軌控制器是關著的，
   // B／Y／X／A 四段高度鍵按了不會動。
   chassis.drive_stop(MotorBrake::coast);
+
+  // Start odometry. set_coordinates() is the ONLY place Drive spawns its odom
+  // task, and the only caller was autonomous() -- so in this program the task
+  // never existed and pose_x / pose_y / the Field panel's marker sat at 0
+  // forever no matter how far the robot was driven. Called here, after
+  // initialize()'s IMU calibration delay has long finished (opcontrol only runs
+  // once the field/competition_initialize path is done), so the heading this
+  // zeroes against is a settled one.
+  // 中文：啟動里程計。set_coordinates() 是 Drive 唯一會生出 odom task 的地方，而原本只有
+  // autonomous() 會呼叫它——所以在這支程式裡那個 task 根本沒被建立過，pose_x／pose_y 與
+  // 場地面板上的圖示不管車子開多遠都永遠是 0。放在這裡呼叫，此時 initialize() 的 IMU
+  // 校正等待早就結束了（opcontrol 一定是在場控／competition_initialize 那條路走完之後才
+  // 跑），所以歸零時用的朝向是穩定的。
+  chassis.set_coordinates(0, 0, 0);
+
   cascade1.tare_position();
   cascade2.tare_position();
   cascade_notify_tare();
@@ -953,6 +1151,13 @@ void tune_opcontrol(){
       // 中文：dashboard 的請求也一併丟掉——比賽中按到的按鈕，不可以留在那裡等遙控期
       // 一恢復就自己啟動。
       ff_request = 0;
+      ff_capture_request = 0;
+      // End a capture cleanly rather than freezing it mid-run: the closing 0
+      // goes out, so whatever was recorded before the match state changed is
+      // still a complete, fittable run.
+      // 中文：擷取要好好收尾、不要凍在半路：結束用的 0 有送出去，所以比賽狀態改變之前
+      // 錄到的東西仍然是完整、可以擬合的一輪。
+      ff_capture_stop();
       screen_set(1, "COMP LOCK");
       last_any = false;
       pros::delay(TUNE_LOOP_MS);
@@ -971,6 +1176,33 @@ void tune_opcontrol(){
     // 迴圈裡每一圈都做是一樣的。比賽被鎖住時不做，理由也一樣：那時候駕駛版的
     // control_arcade() 本來也沒在跑。
     tune_service_cascade_limit();
+
+    // ---- feedforward manual capture, every pass -----------------------------
+    // Deliberately BEFORE the "a test is running" branch and outside it: capture
+    // has to keep publishing while a D-pad preset move runs, because that move
+    // is the thing being measured.
+    // 中文：故意放在「有測試在跑」那個分支之前、而且在它外面：方向鍵的預設動作正在跑
+    // 的時候擷取必須繼續送資料，因為那個動作就是我們要量的東西。
+    ff_capture_step();
+
+    // A capture button press is a toggle: same button starts and ends the run,
+    // and ending it is what makes the panel fit. It is refused only while the
+    // ramp owns those channels.
+    // 中文：擷取按鈕是切換式的：同一顆按鈕開始、也同一顆結束，而「結束」正是讓面板做
+    // 擬合的動作。只有在斜坡正握著那幾條頻道的時候才拒絕。
+    if(ff_capture_request != 0){
+      int req = ff_capture_request;
+      ff_capture_request = 0;
+      if(active_test == ActiveTest::FF_RAMP){
+        screen_set(1, "RAMP BUSY");
+      }
+      else if(ff_capture_target != FfTarget::NONE){
+        screen_set(1, "FF CAP END");
+        ff_capture_stop();
+      }
+      else if(req == 1) ff_capture_start(FfTarget::ARM,     "FF CAP ARM");
+      else              ff_capture_start(FfTarget::CASCADE, "FF CAP CASC");
+    }
 
     // ---- read every button once --------------------------------------------
     bool b_l1   = tune_master.get_digital(DIGITAL_L1);

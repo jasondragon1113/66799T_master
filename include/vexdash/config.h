@@ -25,7 +25,14 @@ namespace vexdash {
 
 using ConfigId = std::uint16_t;
 
-constexpr std::size_t kMaxConfigParams = 64;
+// RAISED 64 -> 96 (2026-07-31, ported from 66994V) -- see the matching note on
+// kMaxChannels in telemetry.h. ConfigId is uint16_t; the cost is ~76 bytes of
+// static RAM per extra slot (~2.4 KB for +32) and a longer registration burst,
+// which bounded_retry_write() flow-controls per frame.
+// 中文：上限 64 → 96，理由同 telemetry.h 的 kMaxChannels。ConfigId 是 uint16_t，
+// 代價是每格約 76 bytes 靜態記憶體（多 32 格約 2.4KB）與註冊 burst 變長，而 burst
+// 由 bounded_retry_write 逐幀流控。
+constexpr std::size_t kMaxConfigParams = 96;
 
 // C-style callback (see frame_codec.h FrameCallback rationale: no
 // <functional>/heap-backed closures assumed on embedded targets).

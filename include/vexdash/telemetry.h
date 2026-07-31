@@ -45,7 +45,21 @@ constexpr std::size_t kMaxSamplesPerFrame = 40;
 
 // Fixed table size for registered channels (declare_channel() fails past
 // this -- V5 has no dynamic allocation to grow it).
-constexpr std::size_t kMaxChannels = 64;
+// RAISED 64 -> 96 (2026-07-31, ported from 66994V). ChannelId is uint16_t, so
+// the id space is nowhere near this; the cost is the fixed ChannelInfo table
+// (~68 bytes each, +32 entries = ~2.2 KB of static RAM) and a longer link-up
+// registration burst. Lengthening that burst is safe: every CHANNEL_DEF frame
+// goes out through bounded_retry_write(), which flow-controls and budgets PER
+// FRAME, so more entries means a longer registration, never a truncated one.
+// kMaxSamplesPerFrame above is a SEPARATE and much tighter limit on how many
+// put()s fit between flushes -- raising this does NOT raise that, and that is
+// the one that actually bites (see the sample-budget note in main.cpp).
+// 中文：上限 64 → 96。ChannelId 是 uint16_t，編號空間差得遠；代價是固定表變大
+// （每筆約 68 bytes，多 32 筆約 2.2KB 靜態記憶體）與 link-up 註冊 burst 變長。
+// burst 變長是安全的：每一幀都走 bounded_retry_write 流控、預算是「每幀」各自計算，
+// 所以只會變慢、不會被截斷。注意上面的 kMaxSamplesPerFrame 是另一個、而且緊得多的
+// 限制（兩次 flush 之間能塞幾個 put），提高這裡**不會**放寬那個。
+constexpr std::size_t kMaxChannels = 96;
 
 // Opt-in CHANNEL_DEF extensions (protocol.md §5.3). Defaults reproduce
 // a plain v1 CHANNEL_DEF (no v11_flags byte emitted at all) so existing

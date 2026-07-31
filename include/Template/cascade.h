@@ -39,13 +39,25 @@ extern float CASCADE_KD;
 extern float CASCADE_STARTI;  // max error (motor degrees) before the I term starts accumulating
 
 // Gravity feedforward: the voltage (same -127..127 units as motor.move()) that
-// just holds the cascade still in mid-air. A cascade lift carries the same
-// weight at every height, so unlike the arm this is a CONSTANT -- no cos().
-// 0 = feedforward off.
+// just holds the cascade still in mid-air (same -127..127 units as move()).
+// Unlike the arm there is no cos() -- the lift has no angle -- but it is NOT one
+// constant either: a cascade's held weight grows as the stages extend, so the
+// feedforward is two numbers with a straight-line blend between them.
+//   CASCADE_KG                = holding command at/below the ramp start (bottom)
+//   CASCADE_KG_TOP            = holding command at/above the ramp end (top)
+//   CASCADE_KG_RAMP_START/END = the two heights you measured those at (motor deg)
+// All 0 (and a full-travel band) by default = feedforward off, same as before.
 // 中文：重力前饋＝把升降停在半空中「剛好不掉」的電壓（跟 move() 同樣的 -127~127
-// 單位）。升降不管停在哪一格，扛的重量都一樣，所以這是個常數，不像手臂要乘
-// cos(角度)。設 0＝不啟用。
+// 單位）。它不像手臂要乘 cos(角度)（升降沒有角度），但也**不是**一個常數：串接式升降
+// 伸出去之後扛的重量會變，所以前饋是兩個數字加上中間的直線過渡。
+//   CASCADE_KG＝過渡帶底部（低點）的撐住電壓
+//   CASCADE_KG_TOP＝過渡帶頂部（高點）的撐住電壓
+//   CASCADE_KG_RAMP_START/END＝你量那兩個數字時的高度（馬達度數）
+// 預設全 0、過渡帶涵蓋整個行程＝不啟用，跟以前一樣。
 extern float CASCADE_KG;
+extern float CASCADE_KG_TOP;
+extern float CASCADE_KG_RAMP_START_DEG;
+extern float CASCADE_KG_RAMP_END_DEG;
 
 // Voltage caps, out of 127. The up cap matches the old L1 jog voltage and the
 // down cap matches the old L2 jog voltage, so the controller can never drive

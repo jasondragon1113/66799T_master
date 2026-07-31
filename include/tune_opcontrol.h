@@ -91,4 +91,15 @@ extern std::int32_t TUNE_CH_SEG;
 // 10ms 迴圈接手、由主迴圈自己跑斜坡——跟底盤測試動作用的是同一套握手。
 void tune_ff_ramp_arm_command(void* user_data);
 void tune_ff_ramp_cascade_command(void* user_data);
+
+// Manual capture (TOGGLE: press to start the run, press again to end it -- the
+// end is what makes the panel fit). While a capture runs, the five channels
+// above are published from ordinary movement, so the coach can move the arm with
+// the D-pad keys and still get a feedforward fit. Mutually exclusive with the
+// ramp: starting a ramp closes an open capture first.
+// 中文：手動擷取（切換式：按一下開始、再按一下結束——「結束」才會讓面板做擬合）。擷取
+// 期間上面那五條頻道會照實反映當下的動作，所以教練用方向鍵把手臂動一動也能擬合出前饋。
+// 與斜坡互斥：啟動斜坡會先把還開著的擷取收掉。
+void tune_ff_capture_arm_command(void* user_data);
+void tune_ff_capture_cascade_command(void* user_data);
 #endif

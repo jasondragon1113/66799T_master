@@ -17,7 +17,37 @@ float CASCADE_KP = 0.1;
 float CASCADE_KI = 0;
 float CASCADE_KD = 0;
 float CASCADE_STARTI = 50;
+
+// Gravity feedforward, in TWO numbers plus the band between them, because one
+// number is not enough for this mechanism. A cascade lift does not carry a
+// constant load: as the stages come out, more of the lift's own mass hangs off
+// the last stage and the band tension changes, so the voltage that just holds it
+// still near the bottom is not the voltage that holds it near the top. With a
+// single kG you end up splitting the difference -- sagging high, creeping low.
+//
+// CASCADE_KG      = holding command at/below RAMP_START (bottom)
+// CASCADE_KG_TOP  = holding command at/above RAMP_END   (top)
+// in between, it blends straight-line between the two.
+// All default to 0 / a full-travel band, so the sum below is 0 until someone
+// tunes it: behaviour is byte-for-byte what it was.
+//
+// How to find them: park the lift low, raise CASCADE_KG until it stops sagging
+// and does not creep up -- that is the bottom number. Do the same near the top
+// for CASCADE_KG_TOP. Then set RAMP_START/END to the two heights you measured at.
+// 中文：重力前饋改成「兩個數字＋中間的過渡帶」，因為這支機構用一個數字不夠。串接式
+// 升降扛的重量不是固定的：節數伸出去之後，越多自身重量掛在最後一節上、皮帶張力也變，
+// 所以「在低點剛好撐住」的電壓不等於「在高點剛好撐住」的電壓。只給一個 kG 的結果就是
+// 兩邊各妥協一半——高的地方往下沉、低的地方自己往上爬。
+// CASCADE_KG＝在 RAMP_START（低點）以下的撐住電壓；CASCADE_KG_TOP＝在 RAMP_END
+// （高點）以上的撐住電壓；中間直線內插。
+// 預設全 0、過渡帶涵蓋整個行程，所以沒調之前這一項就是 0，行為跟以前一模一樣。
+// 量法：把升降停在低處，把 CASCADE_KG 往上加到「不往下沉、也不會自己往上爬」，那就是
+// 低點的數字；在高處對 CASCADE_KG_TOP 做一樣的事。最後把 RAMP_START／END 填成你量測
+// 時的那兩個高度。
 float CASCADE_KG = 0;
+float CASCADE_KG_TOP = 0;
+float CASCADE_KG_RAMP_START_DEG = 0;
+float CASCADE_KG_RAMP_END_DEG = 3900;
 
 const int CASCADE_MAX_VOLTAGE = 100;       // same as the old L1 jog voltage
 const int CASCADE_DOWN_MAX_VOLTAGE = 97;   // same as the old L2 jog voltage
@@ -139,6 +169,14 @@ bool cascade_control_enabled(){
 void cascade_notify_tare(){
   cascade_pid.accumulated_error = 0;
   cascade_pid.previous_error = 0;
+  // Same reason the D term is seeded on the first tick of a move (PID.h): this
+  // controller is a long-lived singleton, so "forget everything" has to include
+  // "and do not treat the next error as a step change from zero", or every tare
+  // and every hand-back would produce one saturated derivative spike.
+  // 中文：跟每個動作第一圈要種 previous_error 是同一個理由（見 PID.h）：這顆控制器是
+  // 長生命週期的單例，「把記憶清掉」就必須連「下一圈不要把誤差當成從 0 跳上來的階躍」
+  // 一起清，否則每次歸零、每次交還控制權都會生出一記飽和的微分尖峰。
+  cascade_pid.first_update = true;
 }
 
 // Sample both motors for the dashboard. Positions every cycle (they are cheap
@@ -231,11 +269,19 @@ void cascade_task(){
     float target = clamp(cascade_target_deg, 0.0f, CASCADE_EXTEND_LIMIT_DEG);
     float error = target - position;
 
-    // Constant gravity term -- the cascade carries the same load at every
-    // height, so there is no angle to scale it by. 0 until it is tuned.
-    // 中文：固定的重力補償。升降不管在哪一格扛的重量都一樣，沒有角度要乘。沒調之
-    // 前是 0。
-    float gravity_ff = CASCADE_KG;
+    // Height-dependent gravity term: CASCADE_KG at the bottom of the band,
+    // CASCADE_KG_TOP at the top, straight-line blend in between (see the note
+    // where these are declared for why one number is not enough here). Both
+    // default to 0, so this is 0 until someone tunes it -- exactly the old
+    // behaviour, which was a single constant that also defaulted to 0.
+    // 中文：跟高度有關的重力補償：過渡帶底部用 CASCADE_KG、頂部用 CASCADE_KG_TOP、
+    // 中間直線內插（為什麼一個數字不夠，見宣告處）。兩個都預設 0，所以沒調之前這裡
+    // 就是 0——跟原本那個同樣預設 0 的單一常數完全一樣。
+    float ramp_span = CASCADE_KG_RAMP_END_DEG - CASCADE_KG_RAMP_START_DEG;
+    float ramp_t = ramp_span > 1
+                     ? clamp((position - CASCADE_KG_RAMP_START_DEG) / ramp_span, 0.0f, 1.0f)
+                     : 0.0f;
+    float gravity_ff = CASCADE_KG + (CASCADE_KG_TOP - CASCADE_KG) * ramp_t;
 
     float output = cascade_pid.compute(error) + gravity_ff;
 

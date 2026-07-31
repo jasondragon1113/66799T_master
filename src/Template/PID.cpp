@@ -90,6 +90,16 @@ float settle_error, float settle_time, float timeout, float update_period) :
  */
 
 float PID::compute(float error){
+  // See PID.h (first_update): on tick one there is no previous error, and
+  // pretending it was 0 fabricates a full-scale derivative step that saturates
+  // the output regardless of kd. Start from the truth -- no change yet.
+  // 中文：見 PID.h 的 first_update：第一圈根本沒有「上一次誤差」，硬當成 0 會生出一個
+  // 滿格的假微分，不管 kd 填多少輸出都會被頂到上限。從事實開始：還沒有任何變化。
+  if (first_update){
+    previous_error = error;
+    first_update = false;
+  }
+
   if (fabs(error) < starti){
     accumulated_error+=error;
   }

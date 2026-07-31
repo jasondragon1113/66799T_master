@@ -59,7 +59,9 @@ enum class WatchScalar : std::uint8_t {
 class WatchRegistry {
  public:
   // 固定容量（無 heap）。比照 lib-core 的 kMaxChannels / kMaxConfigParams。
-  static constexpr std::size_t kMaxWatches = 64;
+  // RAISED 64 -> 96 (2026-07-31, ported from 66994V), in step with kMaxChannels
+  // and kMaxConfigParams. 中文：上限 64 → 96，與那兩個常數同步。
+  static constexpr std::size_t kMaxWatches = 96;
 
   WatchRegistry() = default;
 
@@ -67,7 +69,7 @@ class WatchRegistry {
   // 回傳 true＝已登記/已覆蓋；false＝表滿、名字無效、或 ptr 為 nullptr（null 指標
   // 在入口直接拒絕，不會進表——與 sample_all/declare_all 的防護一致）。同名同類
   // 後者覆蓋前者（更新指標與屬性；覆蓋後既有的 id 快取會在下次 declare_all()
-  // 重新對齊）。表滿（kMaxWatches=64）時登記靜默失敗（回 false），門面的
+  // 重新對齊）。表滿（kMaxWatches，目前 96）時登記靜默失敗（回 false），門面的
   // watch()/watch_config() 不回傳值，超額項會被靜默忽略——上限與行為見
   // docs/quick-start.zh-TW.md 的「常見雷」。
   //
@@ -104,7 +106,7 @@ class WatchRegistry {
   // Burst throttle (second layer of defense alongside the transport-level
   // bounded_retry_write, see bounded_write.h): a robot with many watch()
   // calls emits one CHANNEL_DEF/CONFIG_SCHEMA frame per entry, ALL in this
-  // one synchronous loop -- up to kMaxWatches(64) frames back-to-back with no
+  // one synchronous loop -- up to kMaxWatches (96) frames back-to-back with no
   // gap at all. That is exactly the ~1.5KB link-up registration burst that
   // overwhelms the Smart Port TX FIFO faster than it drains. When `yield` is
   // non-null, this loop calls it every `yield_every` declared frames (a
@@ -114,7 +116,7 @@ class WatchRegistry {
   // existing tests and callers are unaffected).
   // 中文：burst 節流（跟 transport 層的 bounded_retry_write 是雙層保險，見
   // bounded_write.h）：watch() 項目多的機器人一次 declare_all() 會在同一個同步
-  // 迴圈裡連續送出最多 kMaxWatches(64) 個 CHANNEL_DEF/CONFIG_SCHEMA 幀、中間完
+  // 迴圈裡連續送出最多 kMaxWatches（目前 96）個 CHANNEL_DEF/CONFIG_SCHEMA 幀、中間完
   // 全沒有間隔——這正是塞爆 Smart Port TX FIFO 的 ~1.5KB link-up 註冊 burst 本
   // 尊。`yield` 非 null 時，每宣告 `yield_every` 幀就呼叫一次（PROS 上接
   // pros::delay(1)），讓 FIFO 在 burst 中途有機會排空。預設 nullptr／
@@ -139,7 +141,7 @@ class WatchRegistry {
     // telemetry 專用：CHANNEL_DEF 的 path（protocol.md §5.3 v1.4），""＝不宣告。
     // config 項目不用這格（它的群組本來就在 group_or_unit）——不共用緩衝是因為
     // telemetry 需要「單位」與「群組」兩個都存得下。固定長度、無動態配置；成本
-    // ＝kMaxWatches(64) × 64 bytes ≒ 4KB 靜態儲存，與 name 那格同級。
+    // ＝kMaxWatches（目前 96）× 64 bytes ≒ 6KB 靜態儲存，與 name 那格同級。
     char path[kMaxPathLen + 1] = {0};
     Kind kind = Kind::kTelemetry;
     WatchScalar scalar = WatchScalar::kF64;
