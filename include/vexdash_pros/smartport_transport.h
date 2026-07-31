@@ -34,78 +34,107 @@ class ProsSmartPortTransport : public ITransport {
   std::size_t read(std::uint8_t* out, std::size_t len) override;
   std::uint64_t millis() override;
 
-  // ---- registration trickle (2026-07-31, 66994V) --------------------------
+  // ---- registration playback (trickle v2, 2026-07-31, 66994V) -------------
   //
-  // THE BUG THIS EXISTS FOR, measured on a stationary robot: the dashboard's
-  // link quality score dropped to 24 on a regular ~5 second beat while nothing
-  // was moving. 5 s is registration_resend_period_ms, and the resend replays
-  // the WHOLE registry in one synchronous burst -- around 120 frames / 8 KB
-  // with no gap between frames. The Brain's Smart Port FIFO drains fine; the
-  // ESP32 on the far end does not, so its receive buffer overruns partway
-  // through and everything still in flight is lost mid-COBS-frame. The link
-  // does not go down, it just shreds one packet in every burst, forever.
+  // SYMPTOM HISTORY, because the second attempt only makes sense against it:
+  //  * v0, no pacing: the whole registry went out back to back, ~90-120 frames
+  //    / ~8 KB at ~92 KB/s. The dashboard's link quality score sat around 65
+  //    and collapsed to ~24 on the 5 s resend beat with the robot stationary.
+  //    The Brain's FIFO drains fine; the ESP32's small RX buffer does not, and
+  //    what overruns is lost mid-COBS-frame.
+  //  * v1, blocking token bucket at 320 B / 10 ms: baseline rose to 77-82, but
+  //    the 5 s dips remained (22-45). A 0.25 s sprint at 32 KB/s still leaves
+  //    the far end only ~8 ms of slack; one millisecond-scale WiFi stall inside
+  //    that window and the buffer is over again. Making the sprint slower ran
+  //    into the opposite wall: the pump blocks inside the pacing loop, so a
+  //    long burst stops sending PINGs and approaches link_timeout_ms (3000).
   //
-  // bounded_retry_write() cannot see this: it flow-controls against the LOCAL
-  // FIFO, which the Brain empties happily. The far end has no back-pressure
-  // channel at all, so the only fix is to not send faster than it can absorb.
+  // v2 removes the sprint instead of resizing it. There is no burst to survive
+  // a stall if the registry is never sent as a burst.
   //
-  // pace_begin() puts the transport into a token-bucket mode: at most
-  // `budget_bytes` per `window_ms`, sleeping when the bucket is empty. Used
-  // ONLY around the registration burst (link-up AND periodic resend) -- normal
-  // telemetry is nowhere near the rate that causes this and stays unpaced.
+  // HOW: capture, then play back. capture_begin() switches write() from "send
+  // now" to "append to a frame queue"; the registration callback then runs to
+  // completion in microseconds, touching no wire at all. The pump afterwards
+  // calls drain() once per tick and sends ONE frame, alongside its normal
+  // PING / poll / telemetry work. Nothing blocks, ever.
   //
-  // `meanwhile` is called each time the bucket runs dry, before the sleep, so
-  // the caller can keep live data moving instead of the graph freezing for the
-  // length of the trickle. Writes made from inside it SKIP THE GATE but are
-  // still CHARGED to the same bucket. Both halves matter:
-  //   * skipping the gate is what stops the callback recursing into the very
-  //     wait that invoked it (it would deadlock against its own budget);
-  //   * charging it is what keeps the budget honest. Steady-state telemetry on
-  //     this robot is around 14 KB/s, which is the SAME ORDER as the 16 KB/s
-  //     registration budget -- not "negligible". Exempting it from the count
-  //     would put ~30 KB/s on the wire during a trickle, double the configured
-  //     figure, which is the rate the ESP32 could not absorb in the first place.
-  // 中文：桶空時會先呼叫 meanwhile 再睡，讓呼叫端趁空檔把即時資料送出去。從 meanwhile
-  // 發出的寫入**不經過閘門、但一樣要記帳**，兩件事都必要：
-  //   * 不經過閘門，callback 才不會遞迴回叫出它的那個等待（會對著自己的預算死鎖）；
-  //   * 要記帳，預算才誠實。本車穩態遙測約 14KB/s，跟註冊預算 16KB/s **是同一個量級**，
-  //     不是「小到可以忽略」。不記帳的話，涓流期間線上實際會有約 30KB/s，是設定值的兩倍，
-  //     而那正是 ESP32 一開始吃不下的速率。
+  // LOAD MATHS, which is the whole point. Telemetry publishes on a 25 ms period
+  // (~33 Hz measured), so at rest the wire sees a ~350 B frame every ~30 ms:
+  // ~11 KB/s AVERAGE with a ~350 B PEAK in any one 10 ms window. Playback adds
+  // one ~70 B definition frame every 20 ms:
+  //   average  ~11 -> ~15 KB/s   (1.3x)
+  //   peak     measured 1.11x of the resting peak (model bound 1.20x, i.e. the
+  //            worst case where a definition frame shares a window with a
+  //            telemetry frame)
+  // Compare v1: 32 KB/s sustained for 250 ms, ~2.8x the average, all of it in
+  // one burst. The catalogue is ~132 frames, so playback takes ~2.6 s and the
+  // whole cycle (playback + the 5 s idle period) is ~7.6 s. That latency is
+  // the trade v2 deliberately makes: a slower catalogue for a flat wire.
+  // Both figures are peak-vs-peak and average-vs-average -- do not mix them.
   //
-  // 中文：**這段程式是為了一個實測到的 bug**：車子完全靜止時，dashboard 的連線品質分數
-  // 每隔約 5 秒就規律掉到 24。5 秒正是 registration_resend_period_ms，而重送會把整份
-  // 登記表在一個同步迴圈裡一次打出去——約 120 幀、8KB，幀與幀之間完全沒有間隔。
-  // Brain 這端的 FIFO 排得掉，ESP32 那端排不掉：接收緩衝在半途溢位，還在路上的位元組
-  // 整段掉在 COBS 幀中間。連線不會斷，只是每一輪爆發都固定撕掉一個封包，永遠如此。
-  // bounded_retry_write() 看不到這件事——它是對**本地** FIFO 做流控，而本地根本不塞；
-  // 對端沒有任何反壓通道，所以唯一的解法就是「不要送得比對方吃得下還快」。
-  // pace_begin() 讓 transport 進入權杖桶模式：每 window_ms 最多送 budget_bytes，桶空就睡。
-  // **只用在註冊爆發上**（開機首次註冊與週期重送都算），一般遙測遠低於這個速率，不受影響。
-  // 桶空時會先呼叫 meanwhile 再睡，讓呼叫端可以趁空檔把即時資料送出去，圖表不會整段凍住；
-  // 從 meanwhile 裡發出的寫入**不受節流**（見 pacing_stall_），否則它會遞迴回自己這道閘。
-  using PaceStallFn = void (*)(void* ctx);
-  void pace_begin(std::uint32_t budget_bytes, std::uint32_t window_ms, PaceStallFn meanwhile,
-                  void* meanwhile_ctx);
-  void pace_end();
-  // True while a trickle is in progress. Re-entrancy guard for the façade:
-  // a second pace_begin() must not restart the bucket underneath the first.
-  // 中文：涓流進行中為 true。門面用它擋重入——第二次 pace_begin() 不可以把第一次的桶重置。
-  bool pacing() const { return pacing_; }
+  // 中文：**先講症狀史，第二版才有意義**：
+  //  * v0 完全不節流：整份登記表連續打完（約 90-120 幀 / 8KB，瞬時約 92KB/s）。品質分基線
+  //    約 65，每 5 秒重送時掉到約 24。Brain 的 FIFO 排得掉，ESP32 的小 RX 緩衝排不掉，
+  //    溢出的部分掉在 COBS 幀中間。
+  //  * v1 阻塞式權杖桶 320B/10ms：基線升到 77-82，**但 5 秒週期仍掉到 22-45**。0.25 秒、
+  //    32KB/s 的衝刺只留給對端約 8ms 餘裕，WiFi 只要在那個窗口裡卡頓一下就又爆。而把衝刺
+  //    放慢會撞到另一面牆：pump 卡在節流迴圈裡不送 PING，逼近 link_timeout_ms（3000）。
+  // **v2 不是把衝刺調小，是把衝刺拿掉**——只要不是用爆發送的，就沒有「窗口」可以被打爆。
+  // 做法：**先錄再播**。capture_begin() 讓 write() 從「立刻送」改成「存進幀佇列」，註冊回呼
+  // 因此在幾微秒內跑完、完全不碰線路；之後由 pump 每個 tick 呼叫 drain() 送**一幀**，
+  // 跟它平常的 PING／收包／遙測一起做。全程不阻塞。
+  // **負載數學（重點）**：遙測發布週期 25ms（實測約 33Hz），所以靜止時線上是「每約 30ms
+  // 一個 350B 的幀」：**平均**約 11KB/s、**峰值**任一 10ms 窗約 350B。輪播每 20ms 多一幀約 70B：
+  //   平均  約 11 → 約 15 KB/s（1.3 倍）
+  //   峰值  實測 是靜止峰值的 1.11 倍（模型保守估 1.20 倍，即定義幀剛好跟遙測幀擠同一個窗）
+  // 對照 v1：32KB/s 持續 250ms，平均約 **2.8 倍**而且全集中在一波。目錄約 **132 幀**，
+  // 所以輪播約 **2.6 秒**，加上 5 秒間隔整個循環約 **7.6 秒**。這個延遲就是 v2 刻意做的
+  // 取捨：用目錄慢一點換一條平坦的線路。**峰值對峰值、平均對平均，兩組數字不要混用。**
+  //
+  // The queue is sized for the whole catalogue with headroom. If it ever fills
+  // anyway, capture switches OFF for the remainder so the rest of the
+  // registration goes straight out rather than being silently dropped -- a
+  // truncated registry is the exact failure all of this exists to prevent.
+  // 中文：佇列容量按整份目錄加餘裕抓。萬一真的滿了，剩下的部分會**關掉錄製直接送出**，
+  // 而不是安靜丟掉——註冊被截斷正是這整套機制要防的事。
+  static constexpr std::size_t kRegQueueBytes = 12288;
+  // 256, not 192: the FRAME TABLE is the binding limit, not the byte pool.
+  // With both registries at their 96 cap the catalogue is ~200 frames
+  // (96 channels + 96 configs + commands + HELLO + device map) against ~12 KB
+  // of payload, so the byte pool has room to spare while 192 slots would not.
+  // 中文：256 而不是 192——卡住的是**幀數表**，不是位元組池。兩張登記表都到
+  // 96 上限時，目錄約 200 幀（96 频道＋96 參數＋命令＋HELLO＋埠地圖）、但負載只有
+  // 約 12KB，所以位元組池還有餘裕而 192 格不夠。
+  static constexpr std::size_t kRegQueueFrames = 256;
+
+  // Start/stop buffering whole frames instead of sending them.
+  void capture_begin();
+  void capture_end();
+  // True while captured frames are still waiting to be played out.
+  bool playback_pending() const { return frame_next_ < frame_count_; }
+  // Send up to `max_frames` queued frames. Returns true if more remain.
+  bool playback_step(std::size_t max_frames);
+  // True if a capture ever hit the queue limit and fell back to sending the
+  // remainder directly. NOT a count of dropped frames -- nothing is ever
+  // dropped; the fallback sends the tail unbuffered, which is slower on the
+  // wire but complete. A count would also be meaningless here, since the same
+  // branch turns capturing off and so can only ever be taken once per capture.
+  // 中文：錄製曾經撞到佇列上限、改成直接送出尾巴時為 true。**不是被丟弃的幀數**
+  // ——一幀都不會丟，只是尾巴不經緩衝直接上線，線上比較擠但完整。計數也沒意義：
+  // 同一個分支會把錄製關掉，所以每次錄製最多只走得到一次。
+  bool capture_overflowed() const { return capture_overflowed_; }
 
  private:
-  // Blocks until `len` more bytes fit in this window's budget.
-  void pace_gate(std::size_t len);
-
   pros::Serial serial_;
 
-  bool pacing_ = false;
-  bool pacing_stall_ = false;  // inside meanwhile(): nested writes bypass the gate
-  std::uint32_t pace_budget_ = 0;
-  std::uint32_t pace_window_ms_ = 0;
-  std::uint32_t pace_spent_ = 0;
-  std::uint64_t pace_window_start_ = 0;
-  PaceStallFn pace_meanwhile_ = nullptr;
-  void* pace_ctx_ = nullptr;
+  bool capturing_ = false;
+  std::size_t queue_len_ = 0;      // bytes buffered
+  std::size_t queue_read_ = 0;     // byte cursor for playback
+  std::size_t frame_count_ = 0;    // frames buffered
+  std::size_t frame_next_ = 0;     // frame cursor for playback
+  bool capture_overflowed_ = false;
+  std::uint8_t queue_[kRegQueueBytes];
+  std::uint16_t frame_len_[kRegQueueFrames];
 };
 
 }  // namespace vexdash

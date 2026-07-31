@@ -199,95 +199,42 @@ ProsTask* g_task = nullptr;
 bool g_initialized = false;
 
 // ---------------------------------------------------------------------------
-// Registration trickle wrapper
+// Registration playback wrapper (trickle v2)
 // ---------------------------------------------------------------------------
 //
 // The pump replays the whole registry by calling on_register_ in one go, and
 // declare_*() sends each definition frame the moment it is declared -- so the
 // burst is emitted inside the user's callback and the pump has no per-frame
-// hook to pace it with. Rather than rewrite that (it would mean persisting
-// every CHANNEL_DEF's wire bytes so the pump could re-send them one at a
-// time), the pacing is applied where the bytes actually leave: the transport.
+// hook to space it with. Rather than rewrite that (it would mean persisting
+// every CHANNEL_DEF's wire bytes so the pump could re-send them one at a time),
+// the frames are intercepted where they leave: the transport captures them.
 //
-// This trampoline stands in for the caller's register callback, turns the
-// transport's token bucket on for the duration, and turns it off after --
-// which covers BOTH registration paths, link-up and periodic resend, because
-// both go through on_register_.
+// This trampoline stands in for the caller's register callback and puts the
+// transport in capture mode for the duration, so on_register_ returns in
+// microseconds having touched no wire at all. The pump then plays the queue
+// out one frame per tick through registration_drain (see PumpConfig). Covers
+// BOTH registration paths -- link-up and periodic resend -- because both go
+// through on_register_.
 //
 // The USB transport is deliberately left alone: this is an ESP32 receive-buffer
-// problem, and a USB CDC host has no equivalent limit. Pacing there would slow
-// start-up for nothing.
+// problem and a USB CDC host has no equivalent limit, so there the definitions
+// still go out as they are declared.
 //
-// 中文：pump 是「呼叫一次 on_register_，整份登記表就打完」，而 declare_*() 是在宣告的
-// 當下就把定義幀送出去——所以爆發是在使用者的回呼裡發生的，pump 根本沒有逐幀的鉤子可以
-// 節流。與其改寫那套（那要把每個 CHANNEL_DEF 的位元組都存起來，pump 才能一幀一幀重送），
-// 不如在「位元組真正離開的地方」節流，也就是 transport。
-// 這個蹦床函式代替使用者的註冊回呼：開頭把權杖桶打開、結束關掉——**開機首次註冊和週期
-// 重送都會經過 on_register_，所以兩條路徑一起涵蓋**。
-// USB transport 故意不動：這是 ESP32 接收緩衝的問題，USB CDC 主機端沒有這個限制，
-// 在那邊節流只會平白拖慢開機。
+// 中文：pump 是「呼叫一次 on_register_，整份登記表就打完」，而 declare_*() 是在宣告的當下
+// 就把定義幀送出去——爆發發生在使用者的回呼裡，pump 根本沒有逐幀的鉤子可以拉開間隔。
+// 與其改寫那套（那要把每個 CHANNEL_DEF 的位元組都存起來，pump 才能一幀一幀重送），
+// 不如在「幀離開的地方」攔下來：由 transport 負責錄。
+// 這個蹦床函式代替使用者的註冊回呼，期間把 transport 切到錄製模式——on_register_ 因此
+// 在幾微秒內就返回，而且完全沒碰線路；之後 pump 透過 registration_drain 每個 tick 播一幀
+// （見 PumpConfig）。**開機首次註冊和週期重送都會經過 on_register_，所以兩條路徑一起涵蓋。**
+// USB 路徑故意不動：這是 ESP32 接收緩衝的問題，USB CDC 主機端沒有這個限制。
 struct PacedRegister {
   RegisterCallback inner = nullptr;
   void* inner_user_data = nullptr;
   ProsSmartPortTransport* transport = nullptr;
   Session* session = nullptr;
-  std::uint32_t budget_bytes = 0;
-  std::uint32_t window_ms = 0;
-  std::uint64_t last_ping_ms = 0;
 };
 PacedRegister g_paced;
-
-// Heartbeat interval kept up during a trickle. Well inside PumpConfig's
-// link_timeout_ms (3000) with room for several to be missed.
-// 中文：涓流期間自己維持的心跳間隔，遠比 link_timeout_ms（3000）短，漏掉幾次也還安全。
-const std::uint64_t kPacedPingPeriodMs = 500;
-
-// Called once per 1 ms wait while the bucket is empty -- so up to ~9 times per
-// 10 ms window during a trickle, and a few hundred times across one ~0.25 s
-// registration burst. It is cheap by construction rather than by luck: a
-// flush() with nothing buffered sends nothing and returns, and the control
-// loop only put()s once per 25 ms, so the overwhelming majority of these calls
-// are a comparison and a return.
-//
-// TWO JOBS, and the second one is a safety net:
-//   * flush() keeps live telemetry moving, so the graphs do not freeze for the
-//     length of the burst. Its bytes are charged to the same bucket (see
-//     smartport_transport.h) -- that is deliberate and is why the budget had
-//     to be sized for both.
-//   * ping() every ~500 ms keeps the link alive. The pump is stuck inside
-//     pace_gate()'s wait loop for the whole burst and cannot run its own
-//     heartbeat, and link_timeout_ms is 3000: without this, a burst that ran
-//     long for any reason would be indistinguishable from a dead link, and the
-//     resulting DOWN -> UP -> re-register cycle would be a worse oscillation
-//     than the packet loss the trickle exists to fix.
-//
-// Both are re-entrancy-safe: writes from in here bypass the gate by design
-// (pacing_stall_), so neither can recurse into the wait that invoked it.
-//
-// 中文：桶空時每 1ms 等待呼叫一次——涓流中一個 10ms 視窗最多約 9 次，一輪約 0.25 秒的
-// 註冊總共幾百次。它便宜是設計使然、不是運氣：flush() 在沒有緩衝樣本時什麼都不送直接
-// 返回，而控制迴路每 25ms 才 put 一輪，所以絕大多數呼叫就是比一下然後 return。
-// **做兩件事，第二件是保險**：
-//   * flush() 讓即時遙測繼續流動，圖表不會整段凍住。它送出的位元組會記到同一個桶
-//     （見 smartport_transport.h）——那是刻意的，也正是預算必須把兩者一起算進去的原因。
-//   * 每約 500ms 送一次 ping() 維持連線。整輪爆發期間 pump 都卡在 pace_gate() 的等待
-//     迴圈裡、跑不了自己的心跳，而 link_timeout_ms 是 3000ms：沒有這一手的話，某一輪
-//     萬一拖長了，看起來就跟「線斷了」一模一樣，接著的 DOWN→UP→重新註冊震盪會比涓流
-//     原本要修的掉包更糟。
-// 兩者都是重入安全的：從這裡發出的寫入依設計不經過閘門（pacing_stall_），不會遞迴回
-// 叫出它的那個等待。
-void paced_stall(void* ctx) {
-  auto* pr = static_cast<PacedRegister*>(ctx);
-  if (pr->session == nullptr) {
-    return;
-  }
-  const std::uint64_t now = pr->session->transport_millis();
-  pr->session->telemetry().flush(now);
-  if (now - pr->last_ping_ms >= kPacedPingPeriodMs) {
-    pr->session->ping(now);
-    pr->last_ping_ms = now;
-  }
-}
 
 void paced_register(Session& s, void* user_data) {
   // The pump hands back whatever user_data it was constructed with; the real
@@ -297,24 +244,31 @@ void paced_register(Session& s, void* user_data) {
   // g_paced 裡（pump 只存得下一個指標，而這個蹦床函式必須佔掉那一格）。
   (void)user_data;
   PacedRegister* pr = &g_paced;
-  // Re-entrancy: a trickle already running means this is a nested or
-  // overlapping call (a reconnect landing mid-burst). Do the registration
-  // WITHOUT touching the bucket, so the outer pace_end() is still the one that
-  // turns it off and the outer burst's budget is not reset underneath it.
-  // 中文：涓流已經在跑，代表這是巢狀或重疊的呼叫（例如重連剛好落在爆發中間）。
-  // 這時照常註冊但**不碰**權杖桶，讓外層的 pace_end() 仍然是關掉它的人，外層的預算
-  // 也不會被從底下重置掉。
-  const bool own = (pr->transport != nullptr && !pr->transport->pacing());
-  if (own) {
-    pr->last_ping_ms = s.transport_millis();
-    pr->transport->pace_begin(pr->budget_bytes, pr->window_ms, &paced_stall, pr);
+  // capture_begin() always resets the queue, so a registration that starts
+  // while an earlier one is still playing simply replaces it and the catalogue
+  // restarts from the top. That is the correct answer for the case that causes
+  // it -- a reconnect -- because the dashboard on the other end has nothing.
+  // 中文：capture_begin() 一律把佇列清空，所以「上一輪還在播就又開始一輪」等於直接取代、
+  // 目錄從頭再來。而會造成這種情況的正是「重連」，那時對面的 dashboard 手上什麼都沒有，
+  // 從頭來才是對的。
+  if (pr->transport != nullptr) {
+    pr->transport->capture_begin();
   }
   if (pr->inner != nullptr) {
     pr->inner(s, pr->inner_user_data);
   }
-  if (own) {
-    pr->transport->pace_end();
+  if (pr->transport != nullptr) {
+    pr->transport->capture_end();
   }
+}
+
+// Pump-side playback step. Returns true while frames remain.
+bool paced_drain(void* user_data, std::size_t max_frames) {
+  auto* pr = static_cast<PacedRegister*>(user_data);
+  if (pr->transport == nullptr) {
+    return false;
+  }
+  return pr->transport->playback_step(max_frames);
 }
 
 
@@ -337,18 +291,16 @@ void finish_init(RegisterCallback on_register, bool show_status, void* user_data
     cfg.device_scan = &default_device_scan;
     cfg.device_scan_user_data = nullptr;
   }
-  // Trickle the registration burst on the Smart Port path only (see
-  // PacedRegister above; g_transport is the ESP32 bridge there and nullptr-cast
-  // safe here because init_smartport is the only caller that sets it).
-  if (g_smartport_transport != nullptr && cfg.registration_pace_bytes > 0) {
+  // registration_drain_frames 填 0 就關掉，回到 v2 之前「宣告當下就送」的行為。
+  if (g_smartport_transport != nullptr && cfg.registration_drain_frames > 0) {
     g_paced.inner = reg;
     g_paced.inner_user_data = user_data;
     g_paced.transport = g_smartport_transport;
     g_paced.session = g_session;
-    g_paced.budget_bytes = cfg.registration_pace_bytes;
-    g_paced.window_ms = cfg.registration_pace_window_ms;
     reg = &paced_register;
     user_data = nullptr;
+    cfg.registration_drain = &paced_drain;
+    cfg.registration_drain_user_data = &g_paced;
   }
   g_pump = new (g_pump_storage) ConnectionPump(*g_session, cfg, reg, user_data);
   if (show_status) {

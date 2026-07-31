@@ -410,31 +410,41 @@ void initialize() {
 	// dashboard 調參時的資料流節奏一致。
 	vexdash::PumpConfig pump_cfg;
 	pump_cfg.telemetry_period_ms = 25;
-	// registration_pace_bytes / registration_pace_window_ms keep their defaults
-	// (320 B per 10 ms) = the registration TRICKLE. What it fixes is documented
-	// on PumpConfig in connection_pump.h; the arithmetic below is THIS robot's,
-	// recomputed from its own registry, not 66994V's:
+	// registration_drain_* keep their defaults (1 frame per 20 ms) = the v2
+	// registration trickle: the burst is CAPTURED into the transport's queue and
+	// the pump plays it back one frame per tick, so nothing is ever sent flat out
+	// and nothing blocks. See PumpConfig in connection_pump.h; the arithmetic
+	// below is THIS robot's, recomputed from its own registry:
 	//   * registry = 83 entries in the tuning build (74 in the competition one),
-	//     one definition frame each at ~68 B on the wire = ~5.6 KB per burst,
-	//     sent on link-up AND again every registration_resend_period_ms.
-	//   * steady-state telemetry = 34 channels x ~10 B + framing = ~350 B per
-	//     flush, which at the 25 ms period above is ~14 KB/s.
-	//   * the bucket is shared, so registration gets 32 - 14 = ~18 KB/s of the
-	//     320 B/10 ms budget: ~5.6 KB / 18 KB/s = ~0.31 s to place the whole
-	//     registry -- an order of magnitude inside link_timeout_ms (3000 ms),
-	//     with the paced_stall PING every 500 ms as the backstop if a burst
-	//     ever ran long.
-	// 中文：registration_pace_bytes／window_ms 沿用預設（每 10ms 320 bytes），也就是
-	// 註冊涓流。它在修什麼看 connection_pump.h 裡 PumpConfig 那段；下面這筆帳是**這台車
-	// 自己**的登記量重算的，不是 66994V 的：
-	//   * 登記表＝調參版 83 筆（比賽版 74 筆），每筆一個定義幀、線上約 68 bytes＝一輪
-	//     約 5.6KB；開機首次註冊與之後每個 registration_resend_period_ms 各送一輪。
-	//   * 穩態遙測＝34 條頻道 × 約 10 bytes ＋封包框架 ≒ 每次 flush 約 350 bytes，
-	//     以上面 25ms 的週期算約 14KB/s。
-	//   * 桶是共用的，所以註冊分到 32−14＝約 18KB/s：5.6KB ÷ 18KB/s ≒ 0.31 秒送完整份
-	//     登記表——比 link_timeout_ms（3000ms）小一個數量級；萬一某一輪拖長，還有
-	//     paced_stall 每 500ms 的 PING 接住。
-
+	//     one definition frame each = 83 frames captured, ~5.6 KB total. The
+	//     transport queue holds 256 frames / 12 KB, so a full T registration is
+	//     roughly a third of the queue -- capture_overflowed stays false.
+	//   * playback = 1 frame per 20 ms tick, so one round takes 83 x 20 ms =
+	//     ~1.7 s (comp: 74 x 20 ms = ~1.5 s), spread evenly instead of an 8 KB
+	//     wall. registration_resend_period_ms (5000) is stamped AFTER playback
+	//     finishes, so the next round cannot overlap the one before it.
+	//   * live telemetry is untouched by all of this: it keeps flushing on its
+	//     own 25 ms period while the registry drains in the background.
+	// 中文：registration_drain_* 沿用預設（每 20ms 播 1 幀）＝v2 涓流：註冊爆發先被
+	// **擷取**進 transport 的佇列，再由 pump 每個 tick 播一幀出去，全程不會有瞬間全速
+	// 送出、也不會卡住任何人。細節見 connection_pump.h 的 PumpConfig；下面這筆帳是
+	// 用**這台車自己**的登記量重算的：
+	//   * 登記表＝調參版 83 筆（比賽版 74 筆），每筆一個定義幀＝擷取 83 幀、約 5.6KB。
+	//     transport 佇列可裝 256 幀／12KB，所以 T 的整份註冊大約只吃掉三分之一，
+	//     capture_overflowed 不會被設起來。
+	//   * 播放＝每 20ms 一幀，所以一輪要 83 × 20ms ≒ 1.7 秒（比賽版 74 × 20ms ≒ 1.5
+	//     秒），是平均攤開、而不是一道 8KB 的牆。registration_resend_period_ms（5000）
+	//     是**播完才蓋章起算**，所以兩輪不可能重疊。
+	//   * 即時遙測完全不受影響：登記表在背景一幀一幀流出去的同時，它照樣用自己的 25ms
+	//     週期 flush。
+	//
+	// DIAGNOSTIC TOGGLE: set to 1 to send telemetry over the USB cable instead
+	// of the ESP32 bridge (dashboard: switch to "Web Serial" and plug USB into
+	// the Brain). If USB streams fine but the bridge shows zero data, the fault
+	// is in the RS-485 wiring / ESP32 / smart-port path — not in this program.
+	// 中文：診斷開關——改成 1 就走 USB 線傳遙測（dashboard 切「Web Serial」、
+	// USB 插 Brain）。USB 通、橋接零資料＝問題在 RS-485 線/ESP32/智慧埠那段，
+	// 不在車端程式。測完記得改回 0 重燒。
 #define VEXDASH_OVER_USB 0
 #if VEXDASH_OVER_USB
 	// show_status=false: keep the Brain screen free (no LLEMU status HUD).

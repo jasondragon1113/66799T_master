@@ -101,75 +101,67 @@ struct PumpConfig {
   // CHANNEL_DEF（沿用 tick() 第 6 點的自癒機制），但把突發頻率降到 2.5 分之一。
   std::uint32_t registration_resend_period_ms = 5000;
 
-  // ---- registration trickle -------------------------------------------
+  // ---- registration playback (trickle v2) -----------------------------
   //
-  // MEASURED SYMPTOM this fixes (2026-07-31, 66994V, robot stationary): the
-  // dashboard's link quality score fell to 24 on a regular ~5 second beat with
-  // nothing moving. 5 s is registration_resend_period_ms above, and the resend
-  // replays the entire registry in one synchronous burst -- ~120 frames / ~8 KB
-  // back to back after the tables were raised to 96 entries. The Brain's Smart
-  // Port FIFO keeps up; the ESP32 bridge on the far end does not, and once its
-  // receive buffer overruns the rest of the burst is lost mid-COBS-frame. The
-  // link never drops, it just shreds a packet every burst, forever.
+  // WHAT THIS REPLACED, and why the first fix was not enough. Measured with the
+  // robot stationary, dashboard link quality out of 100:
+  //   * no pacing         baseline ~65, dropping to ~24 every 5 s
+  //   * blocking pacer    baseline 77-82, still dropping to 22-45 every 5 s
+  // The resend replays the whole registry, ~90-120 frames / ~8 KB. Sent flat
+  // out that is ~92 KB/s; throttled to 320 B / 10 ms it is a 0.25 s sprint at
+  // 32 KB/s. The ESP32's RX buffer has roughly 8 ms of slack at that rate, so a
+  // single millisecond-scale WiFi stall inside the sprint still overruns it --
+  // which is what the remaining dips were. Slowing the sprint further was not
+  // available either: the pacer BLOCKED the pump, so a longer burst meant no
+  // PINGs for that whole time and link_timeout_ms (3000) started to loom.
   //
-  // bounded_retry_write() cannot help: it flow-controls against the LOCAL FIFO,
-  // which drains fine. The far end has no back-pressure channel, so the only
-  // remedy is to not exceed what it can absorb -- hence a token bucket over the
-  // registration burst only (link-up AND periodic resend). Live telemetry sent
-  // during a trickle is charged to the same bucket (see SIZING below).
+  // v2 removes the burst rather than resizing it. The transport captures the
+  // registration frames instead of sending them (smartport_transport.h), and
+  // the pump plays them back ONE FRAME at a time from its ordinary tick, in
+  // between the PING, the RX poll and the telemetry flush. Nothing blocks and
+  // there is no window to be unlucky inside.
   //
-  // SIZING, and why it is not smaller. The bucket is shared: live telemetry
-  // sent from the stall hook is charged to it too (smartport_transport.h), and
-  // steady-state telemetry on this robot is ~14 KB/s. At the first-cut 160 B /
-  // 10 ms (16 KB/s total) that left registration only ~2 KB/s, stretching one
-  // burst to ~2.8 s -- and the pump is inside pace_gate()'s delay(1) loop for
-  // that whole time, sending no PING and polling no RX. link_timeout_ms is
-  // 3000, so a burst was finishing within a few hundred ms of tripping the
-  // link-down timer: any jitter and the link would drop, reconnect, and
-  // re-register, which is a worse oscillation than the one being fixed.
+  // THE NUMBERS THAT MATTER, and keep peak and average apart. Telemetry
+  // publishes every 25 ms (~33 Hz measured): at rest that is ~11 KB/s AVERAGE
+  // with a ~350 B PEAK in any single 10 ms window. Playback adds one ~70 B
+  // frame per 20 ms -> ~15 KB/s average (1.3x) and a measured 1.11x peak
+  // (model bound 1.20x, the case where a definition frame lands in the same
+  // window as a telemetry frame). v1 by comparison was 32 KB/s for 250 ms,
+  // ~2.8x the average and all of it in one burst. The catalogue is ~132 frames
+  // so playback runs ~2.6 s, and the full cycle (playback + the 5 s idle
+  // period) is ~7.6 s.
   //
-  // 320 B / 10 ms = 32 KB/s total: ~14 KB/s telemetry + ~18 KB/s registration,
-  // so an ~8 KB registry lands in ~0.45 s (8 KB / 18.2 KB/s -- the registry
-  // only gets the registration share, not the total). That is a sub-half-second
-  // sprint rather than a 2.8 s crawl -- an order of magnitude clear of the 3 s
-  // link timeout, while still an order of magnitude below the ~92 KB/s
-  // gap-free blast that overran the ESP32 to begin with. A short sprint it can
-  // absorb; a sustained flood it cannot.
-  //
-  // Belt and braces: the stall hook also emits a PING every ~500 ms during a
-  // trickle (vexdash_pros.cpp paced_stall), so the link-down timer cannot
-  // expire mid-burst even if the burst somehow ran long.
-  //
-  // Set registration_pace_bytes to 0 to disable the trickle entirely.
-  //
-  // 中文：**為什麼不能再調小。** 這個桶是共用的——stall 鉤子送出的即時遙測也要記帳
-  // （見 smartport_transport.h），而本車穩態遙測約 14KB/s。第一版的 160B/10ms（總共
-  // 16KB/s）等於只留給註冊約 2KB/s，一輪要拖到約 2.8 秒；而那整段時間 pump 都卡在
-  // pace_gate() 的 delay(1) 迴圈裡，不送 PING、不收封包。link_timeout_ms 是 3000ms，
-  // 等於一輪結束時距離「判定斷線」只剩幾百毫秒——稍微抖一下就會 DOWN→UP→重新註冊，
-  // 那個震盪比原本要修的問題更糟。
-  // 改成 320B/10ms ＝總共 32KB/s：遙測約 14＋註冊約 18，約 8KB 的登記表約 0.45 秒送完
-  // （8KB ÷ 註冊分到的 18.2KB/s——登記表只吃得到註冊那一份，不是總速率）。
-  // 變成「半秒內的短衝刺」而不是「2.8 秒的慢爬」，離 3 秒門檻差一個數量級，
-  // 同時仍遠低於原本那個約 92KB/s、完全沒有間隔的爆發——短促衝刺 ESP32 吃得下，
-  // 持續灌爆它吃不下。
-  // 另加一道保險：涓流期間 stall 鉤子每約 500ms 會補送一次 PING
-  // （vexdash_pros.cpp 的 paced_stall），就算某一輪真的拖長了，斷線計時也不會到期。
-  //
-  // 中文：**這兩個參數修的是一個實測到的症狀**（2026-07-31，66994V，車子完全靜止）：
-  // dashboard 的連線品質分數每隔約 5 秒規律掉到 24。5 秒正是上面的
-  // registration_resend_period_ms，而重送會把整份登記表在一個同步迴圈裡一次打出去——
-  // 登記上限提到 96 之後大約是 120 幀／8KB，幀與幀之間完全沒有間隔。Brain 這端的 FIFO
-  // 跟得上，對面的 ESP32 跟不上：接收緩衝一溢位，剩下的位元組就整段掉在 COBS 幀中間。
-  // 連線不會斷，只是每一輪爆發固定撕掉一個封包，永遠如此。
-  // bounded_retry_write() 幫不上忙——它是對**本地** FIFO 流控，而本地根本不塞；對端沒有
-  // 任何反壓通道，所以唯一的解就是「不要送得比對方吃得下還快」。因此對**註冊爆發**
-  // （開機首次註冊與週期重送都算）套一個權杖桶；涓流期間送出的遙測也記進同一個桶。
-  // 預設值：每 10ms 視窗 320 bytes ＝總共 32KB/s，約 8KB 的登記表攤在約 0.45 秒送完，
-  // 而且 5 秒的重送週期是**從涓流送完之後**才開始算（兩輪不可能重疊）。
-  // registration_pace_bytes 填 0 ＝ 完全關閉涓流。
-  std::uint32_t registration_pace_bytes = 320;
-  std::uint32_t registration_pace_window_ms = 10;
+  // 中文：**取代了什麼、以及第一版為什麼不夠**（車靜止實測，品質分滿分 100）：
+  //   完全不節流：基線約 65，每 5 秒掉到約 24；阻塞式節流：基線 77-82，**每 5 秒仍掉到
+  //   22-45**。重送要打完整份登記表（約 90-120 幀 / 8KB）：不節流是瞬時約 92KB/s，
+  //   節流成 320B/10ms 是「0.25 秒、32KB/s 的衝刺」。ESP32 的 RX 緩衝在那個速率下只剩
+  //   約 8ms 餘裕，WiFi 在衝刺窗口裡卡頓一毫秒就又爆——剩下的那些掉分就是這樣來的。
+  //   而把衝刺再放慢也不行：舊的節流是**阻塞**的，爆發拉長等於那段時間完全不送 PING，
+  //   逼近 link_timeout_ms（3000）。
+  // **v2 不是把衝刺調小，是把衝刺拿掉**：transport 先把註冊的幀錄下來而不送出
+  // （見 smartport_transport.h），再由 pump 在自己平常的 tick 裡**一次播一幀**，
+  // 夾在 PING、收包、遙測之間。全程不阻塞，也就沒有「窗口」可以倒楣。
+  // **關鍵數字**：穩態每 10ms 約 140B；每 20ms 多一幀約 70B ＝每 tick 多約 35B，
+  // 任何 10ms 窗都不超過穩態的約 1.25 倍。整份目錄約 90 幀 × 20ms ≒ 1.8 秒播完——
+  // 這個延遲就是刻意的取捨：讓 dashboard 的清單花一兩秒長出來，換線路不被捶。
+
+  // Sends up to `max_frames` buffered definition frames. Returns true if more
+  // remain. nullptr = no playback (frames go out as they are declared, the
+  // pre-v2 behaviour, which is still correct for USB).
+  // 中文：送出最多 max_frames 個已錄好的定義幀，還有剩就回 true。nullptr＝不做輪播
+  // （定義幀在宣告當下就送出，也就是 v2 之前的行為——USB 路徑維持這樣是對的）。
+  using RegistrationDrainFn = bool (*)(void* user_data, std::size_t max_frames);
+  RegistrationDrainFn registration_drain = nullptr;
+  void* registration_drain_user_data = nullptr;
+
+  // One definition frame every this many ms, and how many to send each time.
+  // 20 ms / 1 frame is the ~1.25x figure worked out above; raising the frame
+  // count is what you change if a much larger registry ever needs to fit in
+  // the same wall-clock, and it is a direct multiplier on the load.
+  // 中文：每幾毫秒播一次、一次播幾幀。20ms／1 幀就是上面算出來的約 1.25 倍；
+  // 之後若登記表大很多、要在同樣的時間內播完，就是調幀數——它直接等比放大負載。
+  std::uint32_t registration_drain_period_ms = 20;
+  std::uint32_t registration_drain_frames = 1;
 
   // 方案 A（watch 自動上報）鉤子。非 nullptr 時，pump 在每次 telemetry flush 前
   // 先呼叫它一次，讓 watch 登記表把所有登記變數取樣進 telemetry()。預設 nullptr
@@ -310,6 +302,13 @@ class ConnectionPump {
   // reconnect replay, or periodic resend) -- baseline for the periodic
   // registration_resend_period_ms self-heal timer.
   std::uint32_t last_registration_ms_ = 0;
+  // Playback in flight: the registry has been captured and is being sent one
+  // frame at a time. The resend timer does not restart until this clears, so
+  // two playbacks can never overlap however slow one gets.
+  // 中文：輪播進行中——登記表已經錄好、正在一幀一幀送。重送計時要等它結束才重新起算，
+  // 所以不管播多慢，兩輪都不可能重疊。
+  bool registration_playing_ = false;
+  std::uint32_t last_drain_ms_ = 0;
 
   // Timestamp (now_ms) of the most recent device-scan poll -- baseline for the
   // device_scan_period_ms cadence. 中文：上次掃埠的時間，週期掃描的計時基準。

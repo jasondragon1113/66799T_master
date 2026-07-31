@@ -43,12 +43,23 @@ void ConnectionPump::note_command(const char* command_name) {
 
 void ConnectionPump::note_warning(const char* msg) { copy_status_str(last_warning_, msg); }
 
+// Both registration paths set registration_playing_ when a playback hook is
+// installed: with one, on_register_ only fills the transport's capture queue and
+// the frames still have to be played out (tick step 6b). Without one they went
+// straight to the wire and there is nothing left to do.
+// 中文：兩條註冊路徑在有輪播鉤子時都會設 registration_playing_——有鉤子的話，
+// on_register_ 只是把幀填進 transport 的錄製佇列，還要靠第 6b 步播出去；
+// 沒有鉤子的話，幀當下就已經送上線，沒有後續。
 void ConnectionPump::do_register() {
   // protocol.md §6.2: (re)announce ourselves and replay the registry so a
   // freshly-opened dashboard sees channel/config/command/device metadata.
   session_.send_hello();
   if (on_register_ != nullptr) {
     on_register_(session_, user_data_);
+  }
+  if (config_.registration_drain != nullptr) {
+    registration_playing_ = true;
+    last_drain_ms_ = 0;  // first frame goes out on the next tick
   }
   ++stats_.registrations;
   // Count the registration burst as (at least) one TX frame (honest lower
@@ -64,6 +75,10 @@ void ConnectionPump::resend_registration() {
   // replays on_register_().
   if (on_register_ != nullptr) {
     on_register_(session_, user_data_);
+  }
+  if (config_.registration_drain != nullptr) {
+    registration_playing_ = true;
+    last_drain_ms_ = 0;
   }
   ++stats_.registrations;
   // Same honest-lower-bound accounting as do_register().
@@ -143,13 +158,14 @@ void ConnectionPump::tick(std::uint32_t now_ms) {
           // dashboard instance has the full metadata again.
           ++stats_.reconnects;
           do_register();
-          // From the moment the burst FINISHED, same reason as the periodic
-          // resend below: with the trickle on, this call can take several
-          // hundred ms, and timing it from before would shorten the first
-          // real gap by exactly that much.
-          // 中文：從「這一輪送完」起算，理由同下面的週期重送——開了涓流之後這個
-          // 呼叫可能要好幾百毫秒，從呼叫之前起算會把第一段真實間隔剛好縮掉那麼多。
-          last_registration_ms_ = static_cast<std::uint32_t>(session_.transport_millis());
+          // With playback on, this call only CAPTURES the frames; the resend
+          // period restarts when the last one actually reaches the wire (step 6b).
+          // Without playback they are already sent and now is the right moment.
+          // 中文：開了輪播時，這個呼叫只是「錄下來」，重送週期要等最後一幀真的
+          // 上線才重新起算（第 6b 步）。沒有輪播時幀已經送出，現在就是對的時間點。
+          if (!registration_playing_) {
+            last_registration_ms_ = now_ms;
+          }
         }
         ever_up_ = true;
         link_state_ = LinkState::kUp;
@@ -187,21 +203,49 @@ void ConnectionPump::tick(std::uint32_t now_ms) {
     ++tx_frames_;
   }
 
+  // 6b. Registration playback: one definition frame per drain period, in
+  //     between the PING, the RX poll and the telemetry flush. This is what
+  //     replaced the blocking burst -- the wire load stays flat instead of
+  //     spiking, and the pump never stops doing its other work.
+  //     中文：註冊輪播。每個播放週期送一幀定義，夾在 PING、收包、遙測之間。
+  //     這就是取代阻塞式爆發的東西：線路負載保持平坦、不出尖峰，而且 pump
+  //     全程不會停下其他工作。
+  if (registration_playing_) {
+    if (config_.registration_drain == nullptr) {
+      registration_playing_ = false;  // hook went away: nothing to play
+      last_registration_ms_ = now_ms;
+    } else if ((now_ms - last_drain_ms_) >= config_.registration_drain_period_ms) {
+      last_drain_ms_ = now_ms;
+      const bool more = config_.registration_drain(config_.registration_drain_user_data,
+                                                   config_.registration_drain_frames);
+      ++tx_frames_;
+      if (!more) {
+        registration_playing_ = false;
+        // The catalogue is fully on the wire NOW -- this is when the resend
+        // period starts. 中文：目錄到這一刻才真的全部上線，重送週期從這裡起算。
+        last_registration_ms_ = now_ms;
+      }
+    }
+  }
+
   // 7. Periodic registration resend (self-heal for lossy bridges, see class
   //    comment point 6). Only while UP -- no point replaying defs nobody can
   //    hear -- and never sends HELLO (would flicker the dashboard's
   //    already-populated registry). Disabled when the period is 0.
+  // ...and never while the previous one is still playing out, however long that
+  // takes. 中文：而且上一輪還在播的時候絕對不重新開始，不管它播多久。
   if (link_state_ == LinkState::kUp && config_.registration_resend_period_ms > 0 &&
+      !registration_playing_ &&
       (now_ms - last_registration_ms_) >= config_.registration_resend_period_ms) {
     resend_registration();
-    // Restart the period from the moment the burst FINISHED, not from when it
-    // started. With the trickle on, a resend can take several hundred ms; timing
-    // from the start would shorten the real gap between bursts by that much and,
-    // if a burst ever ran longer than the period, would queue the next one the
-    // instant this one ended. 中文：週期從「這一輪送完」起算，不是從開始起算。
-    // 開了涓流之後一輪可能要好幾百毫秒；從開始算會把兩輪之間的真實間隔縮掉那麼多，
-    // 萬一一輪比週期還久，下一輪會在這輪結束的瞬間立刻接上去。
-    last_registration_ms_ = static_cast<std::uint32_t>(session_.transport_millis());
+    // With playback on, this call only CAPTURES the frames; the resend
+    // period restarts when the last one actually reaches the wire (step 6b).
+    // Without playback they are already sent and now is the right moment.
+    // 中文：開了輪播時，這個呼叫只是「錄下來」，重送週期要等最後一幀真的
+    // 上線才重新起算（第 6b 步）。沒有輪播時幀已經送出，現在就是對的時間點。
+    if (!registration_playing_) {
+      last_registration_ms_ = now_ms;
+    }
   }
 
   // 7b. Periodic device-map hotplug poll. The callback scans the smart ports
