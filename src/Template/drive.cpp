@@ -845,6 +845,23 @@ void Drive::control_arcade(){
   // Task in_fxn(intake_status);
   chassis.drive_stop(MotorBrake::coast);
 
+  // Practice-mode odometry. set_coordinates() is the ONLY place Drive spawns
+  // its odom task (see set_coordinates() above: suspend+delete+recreate, so
+  // re-calling it is safe), and outside a match nothing ever calls it -- driver
+  // control entered without field control means autonomous() never ran, so
+  // pose_x / pose_y and the Field panel's marker would sit at 0 forever. Same
+  // fix tune_opcontrol() ships. Guarded on odom_task: in a real match auton
+  // already called set_coordinates() with the true starting pose, and the
+  // auton -> driver hand-over must keep that pose, not re-zero it.
+  // 中文：純練習（不接場控直接進遙控）時 autonomous() 沒跑過，而 set_coordinates()
+  // 是 Drive 唯一會生出 odom task 的地方（見上方：suspend+delete+重建，重複呼叫安全）
+  // ——沒人呼叫它，pose 與場地面板的圖示就永遠停在 0。這裡比照 tune_opcontrol() 歸零
+  // 啟動。用 odom_task 當條件是為了正式比賽：auton 已建立座標系並累積了位置，交棒到
+  // 遙控時 pose 要延續，不能被歸零。
+  if(chassis.odom_task == nullptr){
+    chassis.set_coordinates(0, 0, 0);
+  }
+
   // Cascade starts at position 0 and is never allowed to go below it.
   cascade1.tare_position();
   cascade2.tare_position();
